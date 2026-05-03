@@ -113,8 +113,8 @@ def conv2d_nki(X, W, bias):
         for row_block in nl.affine_range(n_row_blocks):
             row_start = row_block * block_rows
 
-            # Activation band for this spatial block: one buffer per (img,
-            # row_block); loads fill each c_in slice.
+            # One activation band per (img, row_block); must be outside the
+            # c_in_tile_idx loop so every input tile slice lives in one buffer.
             X_bands = nl.ndarray(
                 shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
                 dtype=X.dtype,
@@ -168,31 +168,42 @@ def conv2d_nki(X, W, bias):
                                 X_packed,
                             )
 
-                out_buf = nl.ndarray(
+                # Separate SBUF staging per output tile so the second nl.store
+                # cannot overwrite data still in flight from the first (else
+                # branch allocates out_buf inside each c_out_idx iteration).
+                out_buf0 = nl.ndarray(
+                    shape=(c_out_tile, block_rows, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                out_buf1 = nl.ndarray(
                     shape=(c_out_tile, block_rows, out_width),
                     dtype=X.dtype,
                     buffer=nl.sbuf,
                 )
                 for r in nl.affine_range(block_rows):
-                    out_buf[:, r, :] = nl.add(
+                    out_buf0[:, r, :] = nl.add(
                         psum0[:, r * out_width : (r + 1) * out_width],
                         bias_sbuf[:, 0],
                     )
                 nl.store(
-                    X_out[img, 0:c_out_tile, row_start : row_start + block_rows, :],
-                    out_buf,
+                    X_out[img,
+                          0 * c_out_tile : 1 * c_out_tile,
+                          row_start : row_start + block_rows,
+                          :],
+                    out_buf0,
                 )
                 for r in nl.affine_range(block_rows):
-                    out_buf[:, r, :] = nl.add(
+                    out_buf1[:, r, :] = nl.add(
                         psum1[:, r * out_width : (r + 1) * out_width],
                         bias_sbuf[:, 1],
                     )
                 nl.store(
                     X_out[img,
-                          c_out_tile : 2 * c_out_tile,
+                          1 * c_out_tile : 2 * c_out_tile,
                           row_start : row_start + block_rows,
                           :],
-                    out_buf,
+                    out_buf1,
                 )
             else:
                 # One packed PSUM (128, F_m) per c_out tile.
