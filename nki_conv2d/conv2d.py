@@ -47,13 +47,11 @@ def conv2d_nki(X, W, bias):
     n_tiles_c_in = in_channels // c_in_tile
     n_tiles_c_out = out_channels // c_out_tile
 
-    # Block of output rows processed per spatial iteration.
-    # The asserted divisibility by 512 means (out_h * out_w) is always a multiple
-    # of 512, but out_w may not divide 512 cleanly for arbitrary shapes.
-    # Pick the largest block_rows that evenly tiles out_height.
+    # Block of output rows processed per spatial iteration. Driven by the
+    # asserted out_h * out_w % 512 == 0 constraint: target 512 output positions
+    # per spatial block.
     if out_width <= 512 and (512 % out_width == 0):
         candidate = 512 // out_width
-        # Shrink if it does not divide out_height
         while candidate > 1 and out_height % candidate != 0:
             candidate //= 2
         block_rows = candidate
@@ -85,13 +83,17 @@ def conv2d_nki(X, W, bias):
                           i, j]
                     )
 
-    # Hoist bias loads: one SBUF tile per output-channel tile, reused for every
-    # image and every spatial block. Trace-time Python loop so each tile is a
-    # distinct SBUF allocation.
-    bias_sbuf = []
-    for c_out_idx in range(n_tiles_c_out):
-        bias_sbuf.append(
-            nl.load(bias[c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile])
+    # Hoist bias loads into one SBUF tensor: shape (128, n_tiles_c_out).
+    # Each c_out tile sits in its own free-dim column. Multi-dim NKI tensor
+    # so it can be indexed by either Python ints or LoopVars in the loops below.
+    bias_sbuf = nl.ndarray(
+        shape=(c_out_tile, n_tiles_c_out),
+        dtype=bias.dtype,
+        buffer=nl.sbuf,
+    )
+    for c_out_idx in nl.affine_range(n_tiles_c_out):
+        bias_sbuf[:, c_out_idx] = nl.load(
+            bias[c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile]
         )
 
     # Main compute loop
@@ -99,20 +101,15 @@ def conv2d_nki(X, W, bias):
         for row_block in nl.affine_range(n_row_blocks):
             row_start = row_block * block_rows
 
-            # Allocate PSUM accumulators for this spatial block.
-            # One (128, out_width) tile per (c_out_tile, in-block row).
-            psum_tiles = []
-            for c_out_idx in range(n_tiles_c_out):
-                row_psums = []
-                for r in range(block_rows):
-                    row_psums.append(
-                        nl.zeros(
-                            shape=(c_out_tile, out_width),
-                            dtype=nl.float32,
-                            buffer=nl.psum,
-                        )
-                    )
-                psum_tiles.append(row_psums)
+            # PSUM accumulators for this spatial block.
+            # Layout: (partition=128, free=out_width, c_out_idx, in_block_row).
+            # Indexed as psum_tiles[:, :, c_out_idx, r] to recover one
+            # (128, out_width) accumulator tile.
+            psum_tiles = nl.zeros(
+                shape=(c_out_tile, out_width, n_tiles_c_out, block_rows),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
 
             # Reduce over input-channel tiles
             for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
@@ -125,21 +122,24 @@ def conv2d_nki(X, W, bias):
                       0 : out_width + K - 1]
                 )
 
-                # Fully unrolled kernel taps and output-channel tiles.
-                # Inner loop over r so consecutive matmuls write to different
-                # PSUM accumulators.
-                for i in range(K):
-                    for j in range(K):
-                        for c_out_idx in range(n_tiles_c_out):
+                # All inner loops are nl.affine_range so the loop variables are
+                # LoopVars. NKI tensor indexing supports LoopVars; the compiler
+                # may unroll these tight constant-trip-count loops.
+                for i in nl.affine_range(K):
+                    for j in nl.affine_range(K):
+                        for c_out_idx in nl.affine_range(n_tiles_c_out):
                             W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
-                            for r in range(block_rows):
+                            for r in nl.affine_range(block_rows):
                                 X_slice = X_band[:, r + i, j : j + out_width]
-                                psum_tiles[c_out_idx][r] += nisa.nc_matmul(W_tile, X_slice)
+                                psum_tiles[:, :, c_out_idx, r] += nisa.nc_matmul(W_tile, X_slice)
 
             # Add hoisted bias and store one HBM row per in-block output row.
-            for c_out_idx in range(n_tiles_c_out):
-                for r in range(block_rows):
-                    result = nl.add(psum_tiles[c_out_idx][r], bias_sbuf[c_out_idx])
+            for c_out_idx in nl.affine_range(n_tiles_c_out):
+                for r in nl.affine_range(block_rows):
+                    result = nl.add(
+                        psum_tiles[:, :, c_out_idx, r],
+                        bias_sbuf[:, c_out_idx],
+                    )
                     nl.store(
                         X_out[img,
                               c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
