@@ -68,547 +68,262 @@ def conv2d_nki(X, W, bias):
         buffer=nl.hbm,
     )
 
-    # Stage all weights into SBUF, transposed so that nc_matmul sees
-    # stationary tile (P=c_in=128, F=c_out=128). nl.load_transpose2d is the
-    # supported path for this strided HBM (out,in) plane; nl.load of the same
-    # slice is illegal. Per NKI perf guide: load_transpose2d has lower peak DMA
-    # bandwidth than nl.load but is reasonable when the kernel is matmul /
-    # compute dominated and the transpose amount is modest (small K^2 * tiles).
-    w = nl.ndarray(
-        shape=(c_in_tile, c_out_tile, n_tiles_c_out, n_tiles_c_in, filter_height, filter_width),
-        dtype=W.dtype,
-        buffer=nl.sbuf,
-    )
-    for c_out_tile_idx in nl.affine_range(n_tiles_c_out):
+    if n_tiles_c_out == 2:
+        # out_channels == 256: split w into w0/w1; preload w0 only; pipeline w1
+        # loads into first c_out0 reduction. Generic (i,j) only (no K unroll here).
+        w0 = nl.ndarray(
+            shape=(c_in_tile, c_out_tile, n_tiles_c_in, K, K),
+            dtype=W.dtype,
+            buffer=nl.sbuf,
+        )
+        w1 = nl.ndarray(
+            shape=(c_in_tile, c_out_tile, n_tiles_c_in, K, K),
+            dtype=W.dtype,
+            buffer=nl.sbuf,
+        )
         for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-            for i in nl.affine_range(filter_height):
-                for j in nl.affine_range(filter_width):
-                    w[:, :, c_out_tile_idx, c_in_tile_idx, i, j] = nl.load_transpose2d(
-                        W[c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
+            for i in nl.affine_range(K):
+                for j in nl.affine_range(K):
+                    w0[:, :, c_in_tile_idx, i, j] = nl.load_transpose2d(
+                        W[0 * c_out_tile : 1 * c_out_tile,
                           c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                           i, j]
                     )
 
-    # Hoist bias loads into one SBUF tensor: shape (128, n_tiles_c_out).
-    bias_sbuf = nl.ndarray(
-        shape=(c_out_tile, n_tiles_c_out),
-        dtype=bias.dtype,
-        buffer=nl.sbuf,
-    )
-    for c_out_idx in nl.affine_range(n_tiles_c_out):
-        bias_sbuf[:, c_out_idx] = nl.load(
-            bias[c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile]
+        bias0 = nl.ndarray(shape=(c_out_tile,), dtype=bias.dtype, buffer=nl.sbuf)
+        bias0[:] = nl.load(bias[0 * c_out_tile : 1 * c_out_tile])
+        bias1 = nl.ndarray(shape=(c_out_tile,), dtype=bias.dtype, buffer=nl.sbuf)
+        bias1[:] = nl.load(bias[1 * c_out_tile : 2 * c_out_tile])
+
+        # Prologue (img=0, row_block=0): each tap does pack + matmul(w0), then
+        # load_transpose2d for w1 (prefetch for c_out1 after TE work on this tap).
+        img0 = 0
+        row_start_p = 0
+        X_bands = nl.ndarray(
+            shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
         )
-
-    # Main compute loop: sequential (img, row_block) to cap SBUF live set
-    # (one X_bands, one X_packed, one PSUM per stage; F_m = block_rows * out_width).
-    for img in nl.sequential_range(batch_size):
-        for row_block in nl.sequential_range(n_row_blocks):
-            row_start = row_block * block_rows
-
-            X_bands = nl.ndarray(
-                shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
+        for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+            X_bands[:, c_in_tile_idx, :, :] = nl.load(
+                X[img0,
+                  c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                  row_start_p : row_start_p + block_rows + K - 1,
+                  0 : out_width + K - 1]
             )
 
-            for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-                X_bands[:, c_in_tile_idx, :, :] = nl.load(
-                    X[img,
-                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                      row_start : row_start + block_rows + K - 1,
-                      0 : out_width + K - 1]
-                )
+        psum0 = nl.zeros(
+            shape=(c_out_tile, F_m),
+            dtype=nl.float32,
+            buffer=nl.psum,
+        )
+        for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+            for i in nl.affine_range(K):
+                for j in nl.affine_range(K):
+                    X_packed = nl.ndarray(
+                        shape=(c_in_tile, F_m),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                            X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                            engine=nisa.engine.vector,
+                        )
+                    psum0 += nisa.nc_matmul(
+                        w0[:, :, c_in_tile_idx, i, j],
+                        X_packed,
+                    )
+                    w1[:, :, c_in_tile_idx, i, j] = nl.load_transpose2d(
+                        W[1 * c_out_tile : 2 * c_out_tile,
+                          c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                          i, j]
+                    )
 
-            for c_out_idx in nl.affine_range(n_tiles_c_out):
-                psum_packed = nl.zeros(
+        out_buf = nl.ndarray(
+            shape=(c_out_tile, block_rows, out_width),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
+        )
+        for r in nl.affine_range(block_rows):
+            out_buf[:, r, :] = nl.add(
+                psum0[:, r * out_width : (r + 1) * out_width],
+                bias0,
+            )
+        nl.store(
+            X_out[img0,
+                  0 * c_out_tile : 1 * c_out_tile,
+                  row_start_p : row_start_p + block_rows,
+                  :],
+            out_buf,
+        )
+
+        psum1 = nl.zeros(
+            shape=(c_out_tile, F_m),
+            dtype=nl.float32,
+            buffer=nl.psum,
+        )
+        for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+            for i in nl.affine_range(K):
+                for j in nl.affine_range(K):
+                    X_packed = nl.ndarray(
+                        shape=(c_in_tile, F_m),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                            X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                            engine=nisa.engine.vector,
+                        )
+                    psum1 += nisa.nc_matmul(
+                        w1[:, :, c_in_tile_idx, i, j],
+                        X_packed,
+                    )
+
+        out_buf = nl.ndarray(
+            shape=(c_out_tile, block_rows, out_width),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
+        )
+        for r in nl.affine_range(block_rows):
+            out_buf[:, r, :] = nl.add(
+                psum1[:, r * out_width : (r + 1) * out_width],
+                bias1,
+            )
+        nl.store(
+            X_out[img0,
+                  1 * c_out_tile : 2 * c_out_tile,
+                  row_start_p : row_start_p + block_rows,
+                  :],
+            out_buf,
+        )
+
+        # Steady: img=0, row_block 1 .. n_row_blocks-1 (w0/w1 resident; no w1 reload in c_out0 nest)
+        if n_row_blocks > 1:
+            for row_k in nl.sequential_range(n_row_blocks - 1):
+                row_start_s = (row_k + 1) * block_rows
+                img_s = 0
+                X_bands = nl.ndarray(
+                    shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                    X_bands[:, c_in_tile_idx, :, :] = nl.load(
+                        X[img_s,
+                          c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                          row_start_s : row_start_s + block_rows + K - 1,
+                          0 : out_width + K - 1]
+                    )
+
+                psum0 = nl.zeros(
                     shape=(c_out_tile, F_m),
                     dtype=nl.float32,
                     buffer=nl.psum,
                 )
-
                 for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-                    if K == 3:
-                        # Hard-unrolled 3x3 taps: constant X_bands / w indices.
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 0, 0 : out_width],
-                                engine=nisa.engine.vector,
+                    for i in nl.affine_range(K):
+                        for j in nl.affine_range(K):
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
                             )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 0, 0],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 0, 1 : 1 + out_width],
-                                engine=nisa.engine.vector,
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum0 += nisa.nc_matmul(
+                                w0[:, :, c_in_tile_idx, i, j],
+                                X_packed,
                             )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 0, 1],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 0, 2 : 2 + out_width],
-                                engine=nisa.engine.vector,
+
+                out_buf = nl.ndarray(
+                    shape=(c_out_tile, block_rows, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for r in nl.affine_range(block_rows):
+                    out_buf[:, r, :] = nl.add(
+                        psum0[:, r * out_width : (r + 1) * out_width],
+                        bias0,
+                    )
+                nl.store(
+                    X_out[img_s,
+                          0 * c_out_tile : 1 * c_out_tile,
+                          row_start_s : row_start_s + block_rows,
+                          :],
+                    out_buf,
+                )
+
+                psum1 = nl.zeros(
+                    shape=(c_out_tile, F_m),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+                for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                    for i in nl.affine_range(K):
+                        for j in nl.affine_range(K):
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
                             )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 0, 2],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 1, 0 : out_width],
-                                engine=nisa.engine.vector,
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum1 += nisa.nc_matmul(
+                                w1[:, :, c_in_tile_idx, i, j],
+                                X_packed,
                             )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 1, 0],
-                            X_packed,
+
+                out_buf = nl.ndarray(
+                    shape=(c_out_tile, block_rows, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for r in nl.affine_range(block_rows):
+                    out_buf[:, r, :] = nl.add(
+                        psum1[:, r * out_width : (r + 1) * out_width],
+                        bias1,
+                    )
+                nl.store(
+                    X_out[img_s,
+                          1 * c_out_tile : 2 * c_out_tile,
+                          row_start_s : row_start_s + block_rows,
+                          :],
+                    out_buf,
+                )
+
+        # Steady: img 1 .. batch_size-1, all row blocks
+        if batch_size > 1:
+            for img_k in nl.sequential_range(batch_size - 1):
+                img_s = img_k + 1
+                for row_block in nl.sequential_range(n_row_blocks):
+                    row_start_s = row_block * block_rows
+                    X_bands = nl.ndarray(
+                        shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                        X_bands[:, c_in_tile_idx, :, :] = nl.load(
+                            X[img_s,
+                              c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                              row_start_s : row_start_s + block_rows + K - 1,
+                              0 : out_width + K - 1]
                         )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 1, 1 : 1 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 1, 1],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 1, 2 : 2 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 1, 2],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 2, 0 : out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 2, 0],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 2, 1 : 1 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 2, 1],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 2, 2 : 2 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 2, 2],
-                            X_packed,
-                        )
-                    elif K == 5:
-                        # Hard-unrolled 5x5 taps: constant X_bands / w indices.
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 0, 0 : out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 0, 0],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 0, 1 : 1 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 0, 1],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 0, 2 : 2 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 0, 2],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 0, 3 : 3 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 0, 3],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 0, 4 : 4 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 0, 4],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 1, 0 : out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 1, 0],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 1, 1 : 1 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 1, 1],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 1, 2 : 2 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 1, 2],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 1, 3 : 3 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 1, 3],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 1, 4 : 4 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 1, 4],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 2, 0 : out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 2, 0],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 2, 1 : 1 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 2, 1],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 2, 2 : 2 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 2, 2],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 2, 3 : 3 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 2, 3],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 2, 4 : 4 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 2, 4],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 3, 0 : out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 3, 0],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 3, 1 : 1 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 3, 1],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 3, 2 : 2 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 3, 2],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 3, 3 : 3 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 3, 3],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 3, 4 : 4 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 3, 4],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 4, 0 : out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 4, 0],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 4, 1 : 1 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 4, 1],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 4, 2 : 2 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 4, 2],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 4, 3 : 3 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 4, 3],
-                            X_packed,
-                        )
-                        X_packed = nl.ndarray(
-                            shape=(c_in_tile, F_m),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                                X_bands[:, c_in_tile_idx, r + 4, 4 : 4 + out_width],
-                                engine=nisa.engine.vector,
-                            )
-                        psum_packed += nisa.nc_matmul(
-                            w[:, :, c_out_idx, c_in_tile_idx, 4, 4],
-                            X_packed,
-                        )
-                    else:
+
+                    psum0 = nl.zeros(
+                        shape=(c_out_tile, F_m),
+                        dtype=nl.float32,
+                        buffer=nl.psum,
+                    )
+                    for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                         for i in nl.affine_range(K):
                             for j in nl.affine_range(K):
                                 X_packed = nl.ndarray(
@@ -621,25 +336,634 @@ def conv2d_nki(X, W, bias):
                                         X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
                                         engine=nisa.engine.vector,
                                     )
-                                W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
-                                psum_packed += nisa.nc_matmul(W_tile, X_packed)
+                                psum0 += nisa.nc_matmul(
+                                    w0[:, :, c_in_tile_idx, i, j],
+                                    X_packed,
+                                )
 
-                out_buf = nl.ndarray(
-                    shape=(c_out_tile, block_rows, out_width),
+                    out_buf = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        out_buf[:, r, :] = nl.add(
+                            psum0[:, r * out_width : (r + 1) * out_width],
+                            bias0,
+                        )
+                    nl.store(
+                        X_out[img_s,
+                              0 * c_out_tile : 1 * c_out_tile,
+                              row_start_s : row_start_s + block_rows,
+                              :],
+                        out_buf,
+                    )
+
+                    psum1 = nl.zeros(
+                        shape=(c_out_tile, F_m),
+                        dtype=nl.float32,
+                        buffer=nl.psum,
+                    )
+                    for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                        for i in nl.affine_range(K):
+                            for j in nl.affine_range(K):
+                                X_packed = nl.ndarray(
+                                    shape=(c_in_tile, F_m),
+                                    dtype=X.dtype,
+                                    buffer=nl.sbuf,
+                                )
+                                for r in nl.affine_range(block_rows):
+                                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                        X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                        engine=nisa.engine.vector,
+                                    )
+                                psum1 += nisa.nc_matmul(
+                                    w1[:, :, c_in_tile_idx, i, j],
+                                    X_packed,
+                                )
+
+                    out_buf = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        out_buf[:, r, :] = nl.add(
+                            psum1[:, r * out_width : (r + 1) * out_width],
+                            bias1,
+                        )
+                    nl.store(
+                        X_out[img_s,
+                              1 * c_out_tile : 2 * c_out_tile,
+                              row_start_s : row_start_s + block_rows,
+                              :],
+                        out_buf,
+                    )
+
+    else:
+        # Stage all weights into SBUF (global w), then known-good main loop with K unroll.
+        w = nl.ndarray(
+            shape=(c_in_tile, c_out_tile, n_tiles_c_out, n_tiles_c_in, filter_height, filter_width),
+            dtype=W.dtype,
+            buffer=nl.sbuf,
+        )
+        for c_out_tile_idx in nl.affine_range(n_tiles_c_out):
+            for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                for i in nl.affine_range(filter_height):
+                    for j in nl.affine_range(filter_width):
+                        w[:, :, c_out_tile_idx, c_in_tile_idx, i, j] = nl.load_transpose2d(
+                            W[c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
+                              c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                              i, j]
+                        )
+
+        bias_sbuf = nl.ndarray(
+            shape=(c_out_tile, n_tiles_c_out),
+            dtype=bias.dtype,
+            buffer=nl.sbuf,
+        )
+        for c_out_idx in nl.affine_range(n_tiles_c_out):
+            bias_sbuf[:, c_out_idx] = nl.load(
+                bias[c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile]
+            )
+
+        # Main compute loop: sequential (img, row_block) to cap SBUF live set
+        for img in nl.sequential_range(batch_size):
+            for row_block in nl.sequential_range(n_row_blocks):
+                row_start = row_block * block_rows
+
+                X_bands = nl.ndarray(
+                    shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
                     dtype=X.dtype,
                     buffer=nl.sbuf,
                 )
-                for r in nl.affine_range(block_rows):
-                    out_buf[:, r, :] = nl.add(
-                        psum_packed[:, r * out_width : (r + 1) * out_width],
-                        bias_sbuf[:, c_out_idx],
+
+                for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                    X_bands[:, c_in_tile_idx, :, :] = nl.load(
+                        X[img,
+                          c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                          row_start : row_start + block_rows + K - 1,
+                          0 : out_width + K - 1]
                     )
-                nl.store(
-                    X_out[img,
-                          c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
-                          row_start : row_start + block_rows,
-                          :],
-                    out_buf,
-                )
+
+                for c_out_idx in nl.affine_range(n_tiles_c_out):
+                    psum_packed = nl.zeros(
+                        shape=(c_out_tile, F_m),
+                        dtype=nl.float32,
+                        buffer=nl.psum,
+                    )
+
+                    for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                        if K == 3:
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 0, 0 : out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 0, 0],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 0, 1 : 1 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 0, 1],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 0, 2 : 2 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 0, 2],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 1, 0 : out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 1, 0],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 1, 1 : 1 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 1, 1],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 1, 2 : 2 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 1, 2],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 2, 0 : out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 2, 0],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 2, 1 : 1 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 2, 1],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 2, 2 : 2 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 2, 2],
+                                X_packed,
+                            )
+                        elif K == 5:
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 0, 0 : out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 0, 0],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 0, 1 : 1 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 0, 1],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 0, 2 : 2 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 0, 2],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 0, 3 : 3 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 0, 3],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 0, 4 : 4 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 0, 4],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 1, 0 : out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 1, 0],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 1, 1 : 1 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 1, 1],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 1, 2 : 2 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 1, 2],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 1, 3 : 3 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 1, 3],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 1, 4 : 4 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 1, 4],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 2, 0 : out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 2, 0],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 2, 1 : 1 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 2, 1],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 2, 2 : 2 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 2, 2],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 2, 3 : 3 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 2, 3],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 2, 4 : 4 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 2, 4],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 3, 0 : out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 3, 0],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 3, 1 : 1 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 3, 1],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 3, 2 : 2 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 3, 2],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 3, 3 : 3 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 3, 3],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 3, 4 : 4 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 3, 4],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 4, 0 : out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 4, 0],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 4, 1 : 1 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 4, 1],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 4, 2 : 2 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 4, 2],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 4, 3 : 3 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 4, 3],
+                                X_packed,
+                            )
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + 4, 4 : 4 + out_width],
+                                    engine=nisa.engine.vector,
+                                )
+                            psum_packed += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, 4, 4],
+                                X_packed,
+                            )
+                        else:
+                            for i in nl.affine_range(K):
+                                for j in nl.affine_range(K):
+                                    X_packed = nl.ndarray(
+                                        shape=(c_in_tile, F_m),
+                                        dtype=X.dtype,
+                                        buffer=nl.sbuf,
+                                    )
+                                    for r in nl.affine_range(block_rows):
+                                        X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                            X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                            engine=nisa.engine.vector,
+                                        )
+                                    W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
+                                    psum_packed += nisa.nc_matmul(W_tile, X_packed)
+
+                    out_buf = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        out_buf[:, r, :] = nl.add(
+                            psum_packed[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, c_out_idx],
+                        )
+                    nl.store(
+                        X_out[img,
+                              c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
+                              row_start : row_start + block_rows,
+                              :],
+                        out_buf,
+                    )
 
     return X_out
