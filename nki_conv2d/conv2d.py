@@ -69,11 +69,12 @@ def conv2d_nki(X, W, bias):
         buffer=nl.hbm,
     )
 
-    # Stage all weights into SBUF for nc_matmul (P=c_in, F=c_out). The HBM
-    # slice W[out_tile, in_tile, i, j] is strided; nl.load rejects it, so we
-    # dma_copy into contiguous w_staging then nc_transpose (same result as
-    # load_transpose2d). w_staging is allocated inside the tap loops per NKI
-    # buffer-scope guidance.
+    # Stage all weights into SBUF, transposed so that nc_matmul sees
+    # stationary tile (P=c_in=128, F=c_out=128). nl.load_transpose2d is the
+    # supported path for this strided HBM (out,in) plane; nl.load of the same
+    # slice is illegal. Per NKI perf guide: load_transpose2d has lower peak DMA
+    # bandwidth than nl.load but is reasonable when the kernel is matmul /
+    # compute dominated and the transpose amount is modest (small K^2 * tiles).
     w = nl.ndarray(
         shape=(c_in_tile, c_out_tile, n_tiles_c_out, n_tiles_c_in, filter_height, filter_width),
         dtype=W.dtype,
@@ -83,22 +84,10 @@ def conv2d_nki(X, W, bias):
         for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
             for i in nl.affine_range(filter_height):
                 for j in nl.affine_range(filter_width):
-                    w_staging = nl.ndarray(
-                        shape=(c_out_tile, c_in_tile),
-                        dtype=W.dtype,
-                        buffer=nl.sbuf,
-                    )
-                    nisa.dma_copy(
-                        dst=w_staging,
-                        src=W[
-                            c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
-                            c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                            i,
-                            j,
-                        ],
-                    )
-                    w[:, :, c_out_tile_idx, c_in_tile_idx, i, j] = nisa.nc_transpose(
-                        w_staging
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, i, j] = nl.load_transpose2d(
+                        W[c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
+                          c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                          i, j]
                     )
 
     # Hoist bias loads into one SBUF tensor: shape (128, n_tiles_c_out).
@@ -180,19 +169,24 @@ def conv2d_nki(X, W, bias):
                             W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
                             psum_packed += nisa.nc_matmul(W_tile, X_packed)
 
-                # Bias add and store: split the packed PSUM back into
-                # block_rows separate output rows.
+                # Bias add, then one nl.store for all rows in this block (larger DMA
+                # per Opt #9 vs per-row nl.store).
+                out_buf = nl.ndarray(
+                    shape=(c_out_tile, block_rows, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
                 for r in nl.affine_range(block_rows):
-                    result = nl.add(
+                    out_buf[:, r, :] = nl.add(
                         psum_packed[:, r * out_width : (r + 1) * out_width],
                         bias_sbuf[:, c_out_idx],
                     )
-                    nl.store(
-                        X_out[img,
-                              c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
-                              row_start + r,
-                              :],
-                        result,
-                    )
+                nl.store(
+                    X_out[img,
+                          c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
+                          row_start : row_start + block_rows,
+                          :],
+                    out_buf,
+                )
 
     return X_out
