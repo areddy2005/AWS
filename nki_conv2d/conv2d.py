@@ -97,36 +97,19 @@ def conv2d_nki(X, W, bias):
             bias[c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile]
         )
 
-    # Per-spatial-block activation band buffer, allocated once.
-    # Refilled per (img, row_block) iteration, reused for every (c_out, c_in, i, j).
-    X_bands = nl.ndarray(
-        shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
-        dtype=X.dtype,
-        buffer=nl.sbuf,
-    )
-
-    # Packed moving operand for the matmul. block_rows shifted (128, out_width)
-    # slices laid side-by-side along the free dim so one matmul produces all
-    # block_rows output rows for a single (c_out, c_in, i, j).
-    X_packed = nl.ndarray(
-        shape=(c_in_tile, F_m),
-        dtype=X.dtype,
-        buffer=nl.sbuf,
-    )
-
-    # PSUM accumulator: one (128, F_m) tile per c_out tile per spatial block.
-    # F_m = block_rows * out_width so each column slot corresponds to one
-    # (in_block_row, out_col) output position.
-    psum_packed = nl.ndarray(
-        shape=(c_out_tile, F_m),
-        dtype=nl.float32,
-        buffer=nl.psum,
-    )
-
     # Main compute loop
     for img in nl.affine_range(batch_size):
         for row_block in nl.affine_range(n_row_blocks):
             row_start = row_block * block_rows
+
+            # Activation band for this spatial block. Allocated inside the
+            # (img, row_block) loop so each parallel iteration gets its own
+            # SBUF allocation (NKI affine_range parallelism requires this).
+            X_bands = nl.ndarray(
+                shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
 
             # Refill the activation band for this spatial block, one row per
             # nl.load so each transfer is a clean 2D HBM->SBUF DMA.
@@ -141,8 +124,24 @@ def conv2d_nki(X, W, bias):
 
             # One packed PSUM (128, F_m) per c_out tile.
             for c_out_idx in nl.affine_range(n_tiles_c_out):
-                # Reset the packed PSUM accumulator before the reduction.
-                psum_packed[:, :] = 0.0
+                # Per-iteration packed PSUM accumulator. Reset to zero by
+                # nl.zeros, lifetime bounded to one c_out_idx iteration so
+                # the compiler can reuse the PSUM bank between iterations.
+                psum_packed = nl.zeros(
+                    shape=(c_out_tile, F_m),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+
+                # Per-iteration packed moving operand. block_rows shifted
+                # (128, out_width) slices laid side-by-side along the free
+                # dim so one matmul produces all block_rows output rows for
+                # a single (c_out, c_in, i, j).
+                X_packed = nl.ndarray(
+                    shape=(c_in_tile, F_m),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
 
                 for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                     for i in nl.affine_range(K):
