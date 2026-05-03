@@ -173,8 +173,11 @@ def conv2d_nki(X, W, bias):
                             # SBUF->SBUF copies are cheap relative to the matmul
                             # we save.
                             for r in nl.affine_range(block_rows):
-                                X_packed[:, r * out_width : (r + 1) * out_width] = \
-                                    X_bands[:, c_in_tile_idx, r + i, j : j + out_width]
+                                nisa.tensor_copy(
+                                    X_packed[:, r * out_width : (r + 1) * out_width],
+                                    X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                    engine=nisa.engine.vector,
+                                )
 
                             W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
                             psum_packed += nisa.nc_matmul(W_tile, X_packed)
