@@ -47,14 +47,11 @@ def conv2d_nki(X, W, bias):
     n_tiles_c_in = in_channels // c_in_tile
     n_tiles_c_out = out_channels // c_out_tile
 
-    # Block of output rows processed per spatial iteration. Driven by the
-    # asserted out_h * out_w % 512 == 0 constraint: target 512 output positions
-    # per spatial block.
-    if out_width <= 512 and (512 % out_width == 0):
-        candidate = 512 // out_width
-        while candidate > 1 and out_height % candidate != 0:
-            candidate //= 2
-        block_rows = candidate
+    # Process 2 output rows per spatial block. Keeps the multi-dim PSUM tile
+    # small so the compiler does not blow up its hoisted PSUM footprint, while
+    # still giving every band load 2 rows of reuse.
+    if out_height % 2 == 0:
+        block_rows = 2
     else:
         block_rows = 1
     n_row_blocks = out_height // block_rows
