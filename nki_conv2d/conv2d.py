@@ -109,22 +109,19 @@ def conv2d_nki(X, W, bias):
     # cap the live working set at one spatial block. Inner loops stay
     # affine_range so matmul/pack/load instructions can still overlap
     # within a spatial block.
-    for img in nl.sequential_range(batch_size):
-        for row_block in nl.sequential_range(n_row_blocks):
+    for img in nl.affine_range(batch_size):
+        for row_block in nl.affine_range(n_row_blocks):
             row_start = row_block * block_rows
 
-            # Activation band for this spatial block. Allocated inside the
-            # (img, row_block) loop so each parallel iteration gets its own
-            # SBUF allocation (NKI affine_range parallelism requires this).
+            # Activation band for this spatial block: one buffer per (img,
+            # row_block); loads fill each c_in slice.
             X_bands = nl.ndarray(
                 shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
                 dtype=X.dtype,
                 buffer=nl.sbuf,
             )
 
-            # Refill the activation band for this spatial block. One 2D DMA
-            # per c_in_tile loads the whole (rows, cols) slab in a single
-            # descriptor instead of (block_rows + K - 1) per-row descriptors.
+            # One 2D DMA per c_in_tile loads the whole (rows, cols) slab.
             for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                 X_bands[:, c_in_tile_idx, :, :] = nl.load(
                     X[img,
@@ -133,12 +130,15 @@ def conv2d_nki(X, W, bias):
                       0 : out_width + K - 1]
                 )
 
-            # One packed PSUM (128, F_m) per c_out tile.
-            for c_out_idx in nl.affine_range(n_tiles_c_out):
-                # Per-iteration packed PSUM accumulator. Reset to zero by
-                # nl.zeros, lifetime bounded to one c_out_idx iteration so
-                # the compiler can reuse the PSUM bank between iterations.
-                psum_packed = nl.zeros(
+            if n_tiles_c_out == 2:
+                # Pack activations once per (c_in, i, j); two PSUMs / two matmuls
+                # for output tiles 0 and 1 (better PSUM bank use vs serial c_out).
+                psum0 = nl.zeros(
+                    shape=(c_out_tile, F_m),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+                psum1 = nl.zeros(
                     shape=(c_out_tile, F_m),
                     dtype=nl.float32,
                     buffer=nl.psum,
@@ -147,42 +147,27 @@ def conv2d_nki(X, W, bias):
                 for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                     for i in nl.affine_range(K):
                         for j in nl.affine_range(K):
-                            # Per-(i, j) packed moving operand. block_rows
-                            # shifted (128, out_width) slices laid side-by-side
-                            # along the free dim so one matmul produces all
-                            # block_rows output rows for this (c_out, c_in, i, j).
-                            # Allocated inside the (i, j) loop so each parallel
-                            # affine_range iteration owns its own SBUF region.
                             X_packed = nl.ndarray(
                                 shape=(c_in_tile, F_m),
                                 dtype=X.dtype,
                                 buffer=nl.sbuf,
                             )
 
-                            # Pack block_rows shifted slices into the moving tile.
-                            # SBUF->SBUF copies are cheap relative to the matmul
-                            # we save.
-                            # SBUF->SBUF copies are cheap relative to the matmul
-                            # we save.
-                            # SBUF->SBUF copies are cheap relative to the matmul
-                            # we save.
-                            # SBUF->SBUF copies are cheap relative to the matmul
-                            # we save.
-                            # SBUF->SBUF copies are cheap relative to the matmul
-                            # we save.
-                            # SBUF->SBUF copies are cheap relative to the matmul
-                            # we save.
                             for r in nl.affine_range(block_rows):
                                 X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
                                     X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
                                     engine=nisa.engine.vector,
                                 )
 
-                            W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
-                            psum_packed += nisa.nc_matmul(W_tile, X_packed)
+                            psum0 += nisa.nc_matmul(
+                                w[:, :, 0, c_in_tile_idx, i, j],
+                                X_packed,
+                            )
+                            psum1 += nisa.nc_matmul(
+                                w[:, :, 1, c_in_tile_idx, i, j],
+                                X_packed,
+                            )
 
-                # Bias add, then one nl.store for all rows in this block (larger DMA
-                # per Opt #9 vs per-row nl.store).
                 out_buf = nl.ndarray(
                     shape=(c_out_tile, block_rows, out_width),
                     dtype=X.dtype,
@@ -190,15 +175,68 @@ def conv2d_nki(X, W, bias):
                 )
                 for r in nl.affine_range(block_rows):
                     out_buf[:, r, :] = nl.add(
-                        psum_packed[:, r * out_width : (r + 1) * out_width],
-                        bias_sbuf[:, c_out_idx],
+                        psum0[:, r * out_width : (r + 1) * out_width],
+                        bias_sbuf[:, 0],
+                    )
+                nl.store(
+                    X_out[img, 0:c_out_tile, row_start : row_start + block_rows, :],
+                    out_buf,
+                )
+                for r in nl.affine_range(block_rows):
+                    out_buf[:, r, :] = nl.add(
+                        psum1[:, r * out_width : (r + 1) * out_width],
+                        bias_sbuf[:, 1],
                     )
                 nl.store(
                     X_out[img,
-                          c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
+                          c_out_tile : 2 * c_out_tile,
                           row_start : row_start + block_rows,
                           :],
                     out_buf,
                 )
+            else:
+                # One packed PSUM (128, F_m) per c_out tile.
+                for c_out_idx in nl.affine_range(n_tiles_c_out):
+                    psum_packed = nl.zeros(
+                        shape=(c_out_tile, F_m),
+                        dtype=nl.float32,
+                        buffer=nl.psum,
+                    )
+
+                    for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                        for i in nl.affine_range(K):
+                            for j in nl.affine_range(K):
+                                X_packed = nl.ndarray(
+                                    shape=(c_in_tile, F_m),
+                                    dtype=X.dtype,
+                                    buffer=nl.sbuf,
+                                )
+
+                                for r in nl.affine_range(block_rows):
+                                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                        X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                        engine=nisa.engine.vector,
+                                    )
+
+                                W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
+                                psum_packed += nisa.nc_matmul(W_tile, X_packed)
+
+                    out_buf = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        out_buf[:, r, :] = nl.add(
+                            psum_packed[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, c_out_idx],
+                        )
+                    nl.store(
+                        X_out[img,
+                              c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
+                              row_start : row_start + block_rows,
+                              :],
+                        out_buf,
+                    )
 
     return X_out
