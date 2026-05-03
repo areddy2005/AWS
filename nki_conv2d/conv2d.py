@@ -162,6 +162,16 @@ def conv2d_nki(X, W, bias):
                             # Pack block_rows shifted slices into the moving tile.
                             # SBUF->SBUF copies are cheap relative to the matmul
                             # we save.
+                            # SBUF->SBUF copies are cheap relative to the matmul
+                            # we save.
+                            # SBUF->SBUF copies are cheap relative to the matmul
+                            # we save.
+                            # SBUF->SBUF copies are cheap relative to the matmul
+                            # we save.
+                            # SBUF->SBUF copies are cheap relative to the matmul
+                            # we save.
+                            # SBUF->SBUF copies are cheap relative to the matmul
+                            # we save.
                             for r in nl.affine_range(block_rows):
                                 X_packed[:, r * out_width : (r + 1) * out_width] = \
                                     X_bands[:, c_in_tile_idx, r + i, j : j + out_width]
