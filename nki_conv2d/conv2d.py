@@ -97,9 +97,16 @@ def conv2d_nki(X, W, bias):
             bias[c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile]
         )
 
-    # Main compute loop
-    for img in nl.affine_range(batch_size):
-        for row_block in nl.affine_range(n_row_blocks):
+    # Main compute loop. Outer (img, row_block) loops are sequential so the
+    # compiler does NOT keep multiple iterations' SBUF allocations
+    # (X_bands, X_packed) alive concurrently. With affine_range here, the
+    # compiler was over-parallelizing for fp32 / small-batch shapes,
+    # exceeding SBUF and spilling 80+ MiB to HBM. Sequential outer loops
+    # cap the live working set at one spatial block. Inner loops stay
+    # affine_range so matmul/pack/load instructions can still overlap
+    # within a spatial block.
+    for img in nl.sequential_range(batch_size):
+        for row_block in nl.sequential_range(n_row_blocks):
             row_start = row_block * block_rows
 
             # Activation band for this spatial block. Allocated inside the
@@ -156,7 +163,16 @@ def conv2d_nki(X, W, bias):
                                     X_bands[:, c_in_tile_idx, r + i, j : j + out_width]
 
                             W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
-                            psum_packed += nisa.nc_matmul(W_tile, X_packed)
+                            # Fused matmul+accumulate: writes into psum_packed
+                            # in place, removing the transient PSUM result tile
+                            # that += would otherwise allocate. Reduces PSUM
+                            # bank pressure and helps the allocator avoid spill.
+                            nisa.nc_matmul(
+                                psum_packed,
+                                W_tile,
+                                X_packed,
+                                accumulate=True,
+                            )
 
                 # Bias add and store: split the packed PSUM back into
                 # block_rows separate output rows.
