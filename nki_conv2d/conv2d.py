@@ -47,9 +47,9 @@ def conv2d_nki(X, W, bias):
     n_tiles_c_in = in_channels // c_in_tile
     n_tiles_c_out = out_channels // c_out_tile
 
-    # Process 2 output rows per spatial block. Keeps the multi-dim PSUM tile
-    # small so the compiler does not blow up its hoisted PSUM footprint, while
-    # still giving every band load 2 rows of reuse.
+    # Process 2 output rows per spatial block. Small enough to keep each PSUM
+    # tile alive for only K*K*n_cin matmuls, large enough to give one band load
+    # 2 rows of reuse.
     if out_height % 2 == 0:
         block_rows = 2
     else:
@@ -81,8 +81,6 @@ def conv2d_nki(X, W, bias):
                     )
 
     # Hoist bias loads into one SBUF tensor: shape (128, n_tiles_c_out).
-    # Each c_out tile sits in its own free-dim column. Multi-dim NKI tensor
-    # so it can be indexed by either Python ints or LoopVars in the loops below.
     bias_sbuf = nl.ndarray(
         shape=(c_out_tile, n_tiles_c_out),
         dtype=bias.dtype,
@@ -98,45 +96,43 @@ def conv2d_nki(X, W, bias):
         for row_block in nl.affine_range(n_row_blocks):
             row_start = row_block * block_rows
 
-            # PSUM accumulators for this spatial block.
-            # Layout: (partition=128, free=out_width, c_out_idx, in_block_row).
-            # Indexed as psum_tiles[:, :, c_out_idx, r] to recover one
-            # (128, out_width) accumulator tile.
-            psum_tiles = nl.zeros(
-                shape=(c_out_tile, out_width, n_tiles_c_out, block_rows),
-                dtype=nl.float32,
-                buffer=nl.psum,
+            # Pre-stage every c_in_tile's activation band into SBUF for this
+            # spatial block. Each band covers block_rows + K - 1 input rows
+            # plus the kernel column halo, and is reused across all
+            # (c_out_idx, r, i, j) iterations below.
+            X_bands = nl.ndarray(
+                shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
             )
-
-            # Reduce over input-channel tiles
             for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-                # Single wide activation load that covers the full output row block
-                # plus the kernel halo. Reused for every (i, j, r) tap below.
-                X_band = nl.load(
+                X_bands[:, c_in_tile_idx, :, :] = nl.load(
                     X[img,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                       row_start : row_start + block_rows + K - 1,
                       0 : out_width + K - 1]
                 )
 
-                # All inner loops are nl.affine_range so the loop variables are
-                # LoopVars. NKI tensor indexing supports LoopVars; the compiler
-                # may unroll these tight constant-trip-count loops.
-                for i in nl.affine_range(K):
-                    for j in nl.affine_range(K):
-                        for c_out_idx in nl.affine_range(n_tiles_c_out):
-                            W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
-                            for r in nl.affine_range(block_rows):
-                                X_slice = X_band[:, r + i, j : j + out_width]
-                                psum_tiles[:, :, c_out_idx, r] += nisa.nc_matmul(W_tile, X_slice)
-
-            # Add hoisted bias and store one HBM row per in-block output row.
+            # One (128, out_width) PSUM at a time, accumulating across all
+            # c_in_tile reductions and kernel taps. Same PSUM allocation
+            # pattern as the original kernel, so the compiler does not have
+            # to manage a multi-dim PSUM tensor.
             for c_out_idx in nl.affine_range(n_tiles_c_out):
                 for r in nl.affine_range(block_rows):
-                    result = nl.add(
-                        psum_tiles[:, :, c_out_idx, r],
-                        bias_sbuf[:, c_out_idx],
+                    psum = nl.zeros(
+                        shape=(c_out_tile, out_width),
+                        dtype=nl.float32,
+                        buffer=nl.psum,
                     )
+
+                    for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                        for i in nl.affine_range(K):
+                            for j in nl.affine_range(K):
+                                W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
+                                X_slice = X_bands[:, c_in_tile_idx, r + i, j : j + out_width]
+                                psum += nisa.nc_matmul(W_tile, X_slice)
+
+                    result = nl.add(psum, bias_sbuf[:, c_out_idx])
                     nl.store(
                         X_out[img,
                               c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
