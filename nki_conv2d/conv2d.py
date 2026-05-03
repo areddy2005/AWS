@@ -69,28 +69,36 @@ def conv2d_nki(X, W, bias):
         buffer=nl.hbm,
     )
 
-    # Stage all weights into SBUF, transposed so that nc_matmul sees
-    # stationary tile (P=c_in=128, F=c_out=128).
+    # Stage all weights into SBUF for nc_matmul (P=c_in, F=c_out). The HBM
+    # slice W[out_tile, in_tile, i, j] is strided; nl.load rejects it, so we
+    # dma_copy into contiguous w_staging then nc_transpose (same result as
+    # load_transpose2d). w_staging is allocated inside the tap loops per NKI
+    # buffer-scope guidance.
     w = nl.ndarray(
         shape=(c_in_tile, c_out_tile, n_tiles_c_out, n_tiles_c_in, filter_height, filter_width),
         dtype=W.dtype,
         buffer=nl.sbuf,
     )
-    # Per AWS NKI guidance (load + nc_transpose vs load_transpose2d): use a
-    # contiguous nl.load of the (c_out, c_in) tile then nc_transpose into the
-    # matmul layout (P=c_in, F=c_out). Improves DMA burst behavior; transpose
-    # runs on-chip after the load.
     for c_out_tile_idx in nl.affine_range(n_tiles_c_out):
         for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
             for i in nl.affine_range(filter_height):
                 for j in nl.affine_range(filter_width):
-                    w_hbm_tile = nl.load(
-                        W[c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
-                          c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                          i, j]
+                    w_staging = nl.ndarray(
+                        shape=(c_out_tile, c_in_tile),
+                        dtype=W.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    nisa.dma_copy(
+                        dst=w_staging,
+                        src=W[
+                            c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
+                            c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                            i,
+                            j,
+                        ],
                     )
                     w[:, :, c_out_tile_idx, c_in_tile_idx, i, j] = nisa.nc_transpose(
-                        w_hbm_tile
+                        w_staging
                     )
 
     # Hoist bias loads into one SBUF tensor: shape (128, n_tiles_c_out).
