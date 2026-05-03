@@ -76,14 +76,21 @@ def conv2d_nki(X, W, bias):
         dtype=W.dtype,
         buffer=nl.sbuf,
     )
+    # Per AWS NKI guidance (load + nc_transpose vs load_transpose2d): use a
+    # contiguous nl.load of the (c_out, c_in) tile then nc_transpose into the
+    # matmul layout (P=c_in, F=c_out). Improves DMA burst behavior; transpose
+    # runs on-chip after the load.
     for c_out_tile_idx in nl.affine_range(n_tiles_c_out):
         for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
             for i in nl.affine_range(filter_height):
                 for j in nl.affine_range(filter_width):
-                    w[:, :, c_out_tile_idx, c_in_tile_idx, i, j] = nl.load_transpose2d(
+                    w_hbm_tile = nl.load(
                         W[c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
                           c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                           i, j]
+                    )
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, i, j] = nisa.nc_transpose(
+                        w_hbm_tile
                     )
 
     # Hoist bias loads into one SBUF tensor: shape (128, n_tiles_c_out).
