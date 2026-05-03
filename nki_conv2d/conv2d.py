@@ -111,16 +111,16 @@ def conv2d_nki(X, W, bias):
                 buffer=nl.sbuf,
             )
 
-            # Refill the activation band for this spatial block, one row per
-            # nl.load so each transfer is a clean 2D HBM->SBUF DMA.
+            # Refill the activation band for this spatial block. One 2D DMA
+            # per c_in_tile loads the whole (rows, cols) slab in a single
+            # descriptor instead of (block_rows + K - 1) per-row descriptors.
             for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-                for row in nl.affine_range(block_rows + K - 1):
-                    X_bands[:, c_in_tile_idx, row, :] = nl.load(
-                        X[img,
-                          c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                          row_start + row,
-                          0 : out_width + K - 1]
-                    )
+                X_bands[:, c_in_tile_idx, :, :] = nl.load(
+                    X[img,
+                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                      row_start : row_start + block_rows + K - 1,
+                      0 : out_width + K - 1]
+                )
 
             # One packed PSUM (128, F_m) per c_out tile.
             for c_out_idx in nl.affine_range(n_tiles_c_out):
