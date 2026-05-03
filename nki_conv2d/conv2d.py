@@ -50,7 +50,7 @@ def conv2d_nki(X, W, bias):
     # Block of output rows per spatial iteration. Packed matmul free dim
     # F_m = block_rows * out_width targets ~256 (half of the typical TE max
     # ~512) to shrink activation / packed SBUF vs filling to 512.
-    MAX_F_M = 256
+    MAX_F_M = 512
     if out_width <= MAX_F_M and (MAX_F_M % out_width == 0):
         candidate = MAX_F_M // out_width
         # Shrink if it does not evenly tile out_height
@@ -110,7 +110,7 @@ def conv2d_nki(X, W, bias):
     # affine_range so matmul/pack/load instructions can still overlap
     # within a spatial block.
     for img in nl.sequential_range(batch_size):
-        for row_block in nl.sequential_range(n_row_blocks):
+        for row_block in nl.affine_range(n_row_blocks):
             row_start = row_block * block_rows
 
             # One activation band per (img, row_block); must be outside the
