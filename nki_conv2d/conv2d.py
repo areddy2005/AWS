@@ -90,10 +90,11 @@ def conv2d_nki(X, W, bias):
                           i, j]
                     )
 
-        bias0 = nl.ndarray(shape=(c_out_tile,), dtype=bias.dtype, buffer=nl.sbuf)
-        bias0[:] = nl.load(bias[0 * c_out_tile : 1 * c_out_tile])
-        bias1 = nl.ndarray(shape=(c_out_tile,), dtype=bias.dtype, buffer=nl.sbuf)
-        bias1[:] = nl.load(bias[1 * c_out_tile : 2 * c_out_tile])
+        # (c_out_tile, 1): NKI rejects 1D bias0[:] = nl.load(...); match bias_sbuf column layout.
+        bias0 = nl.ndarray(shape=(c_out_tile, 1), dtype=bias.dtype, buffer=nl.sbuf)
+        bias0[:, 0] = nl.load(bias[0 * c_out_tile : 1 * c_out_tile])
+        bias1 = nl.ndarray(shape=(c_out_tile, 1), dtype=bias.dtype, buffer=nl.sbuf)
+        bias1[:, 0] = nl.load(bias[1 * c_out_tile : 2 * c_out_tile])
 
         # Prologue (img=0, row_block=0): each tap does pack + matmul(w0), then
         # load_transpose2d for w1 (prefetch for c_out1 after TE work on this tap).
