@@ -133,22 +133,24 @@ def conv2d_nki(X, W, bias):
                     buffer=nl.psum,
                 )
 
-                # Per-iteration packed moving operand. block_rows shifted
-                # (128, out_width) slices laid side-by-side along the free
-                # dim so one matmul produces all block_rows output rows for
-                # a single (c_out, c_in, i, j).
-                X_packed = nl.ndarray(
-                    shape=(c_in_tile, F_m),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-
                 for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                     for i in nl.affine_range(K):
                         for j in nl.affine_range(K):
-                            # Pack block_rows shifted slices into one
-                            # (128, F_m) moving tile. SBUF->SBUF copies are
-                            # cheap relative to the matmul we save.
+                            # Per-(i, j) packed moving operand. block_rows
+                            # shifted (128, out_width) slices laid side-by-side
+                            # along the free dim so one matmul produces all
+                            # block_rows output rows for this (c_out, c_in, i, j).
+                            # Allocated inside the (i, j) loop so each parallel
+                            # affine_range iteration owns its own SBUF region.
+                            X_packed = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+
+                            # Pack block_rows shifted slices into the moving tile.
+                            # SBUF->SBUF copies are cheap relative to the matmul
+                            # we save.
                             for r in nl.affine_range(block_rows):
                                 X_packed[:, r * out_width : (r + 1) * out_width] = \
                                     X_bands[:, c_in_tile_idx, r + i, j : j + out_width]
