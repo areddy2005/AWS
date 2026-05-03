@@ -178,16 +178,7 @@ def conv2d_nki(X, W, bias):
                                     X_bands[:, c_in_tile_idx, r + i, j : j + out_width]
 
                             W_tile = w[:, :, c_out_idx, c_in_tile_idx, i, j]
-                            # Fused matmul+accumulate: writes into psum_packed
-                            # in place, removing the transient PSUM result tile
-                            # that += would otherwise allocate. Reduces PSUM
-                            # bank pressure and helps the allocator avoid spill.
-                            nisa.nc_matmul(
-                                psum_packed,
-                                W_tile,
-                                X_packed,
-                                accumulate=True,
-                            )
+                            psum_packed += nisa.nc_matmul(W_tile, X_packed)
 
                 # Bias add and store: split the packed PSUM back into
                 # block_rows separate output rows.
