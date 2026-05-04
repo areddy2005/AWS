@@ -61,6 +61,9 @@ def conv2d_nki(X, W, bias):
     n_row_blocks = out_height // block_rows
     F_m = block_rows * out_width   # packed matmul free dimension
 
+    # Chunked HBM stores for out256 path (epilogue only); requires block_rows % CHUNK_ROWS == 0.
+    CHUNK_ROWS = 4
+
     # Output tensor in HBM
     X_out = nl.ndarray(
         shape=(batch_size, out_channels, out_height, out_width),
@@ -153,45 +156,90 @@ def conv2d_nki(X, W, bias):
                         X_packed_first_block,
                     )
 
-        out_buf0_first = nl.ndarray(
-            shape=(c_out_tile, block_rows, out_width),
-            dtype=X.dtype,
-            buffer=nl.sbuf,
-        )
-        for r in nl.affine_range(block_rows):
-            out_buf0_first[:, r, :] = nl.add(
-                psum0_first[:, r * out_width : (r + 1) * out_width],
-                bias_sbuf[:, 0],
-            )
-        nl.store(
-            X_out[
-                0,
-                0 * c_out_tile : 1 * c_out_tile,
-                0 : block_rows,
-                :,
-            ],
-            out_buf0_first,
-        )
+        if block_rows % CHUNK_ROWS == 0:
+            for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                out_chunk0_first = nl.ndarray(
+                    shape=(c_out_tile, CHUNK_ROWS, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for cr in nl.affine_range(CHUNK_ROWS):
+                    r = rr * CHUNK_ROWS + cr
+                    out_chunk0_first[:, cr, :] = nl.add(
+                        psum0_first[:, r * out_width : (r + 1) * out_width],
+                        bias_sbuf[:, 0],
+                    )
+                nl.store(
+                    X_out[
+                        0,
+                        0 * c_out_tile : 1 * c_out_tile,
+                        rr * CHUNK_ROWS : (rr + 1) * CHUNK_ROWS,
+                        :,
+                    ],
+                    out_chunk0_first,
+                )
 
-        out_buf1_first = nl.ndarray(
-            shape=(c_out_tile, block_rows, out_width),
-            dtype=X.dtype,
-            buffer=nl.sbuf,
-        )
-        for r in nl.affine_range(block_rows):
-            out_buf1_first[:, r, :] = nl.add(
-                psum1_first[:, r * out_width : (r + 1) * out_width],
-                bias_sbuf[:, 1],
+            for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                out_chunk1_first = nl.ndarray(
+                    shape=(c_out_tile, CHUNK_ROWS, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for cr in nl.affine_range(CHUNK_ROWS):
+                    r = rr * CHUNK_ROWS + cr
+                    out_chunk1_first[:, cr, :] = nl.add(
+                        psum1_first[:, r * out_width : (r + 1) * out_width],
+                        bias_sbuf[:, 1],
+                    )
+                nl.store(
+                    X_out[
+                        0,
+                        1 * c_out_tile : 2 * c_out_tile,
+                        rr * CHUNK_ROWS : (rr + 1) * CHUNK_ROWS,
+                        :,
+                    ],
+                    out_chunk1_first,
+                )
+        else:
+            out_buf0_first = nl.ndarray(
+                shape=(c_out_tile, block_rows, out_width),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
             )
-        nl.store(
-            X_out[
-                0,
-                1 * c_out_tile : 2 * c_out_tile,
-                0 : block_rows,
-                :,
-            ],
-            out_buf1_first,
-        )
+            for r in nl.affine_range(block_rows):
+                out_buf0_first[:, r, :] = nl.add(
+                    psum0_first[:, r * out_width : (r + 1) * out_width],
+                    bias_sbuf[:, 0],
+                )
+            nl.store(
+                X_out[
+                    0,
+                    0 * c_out_tile : 1 * c_out_tile,
+                    0 : block_rows,
+                    :,
+                ],
+                out_buf0_first,
+            )
+
+            out_buf1_first = nl.ndarray(
+                shape=(c_out_tile, block_rows, out_width),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
+            for r in nl.affine_range(block_rows):
+                out_buf1_first[:, r, :] = nl.add(
+                    psum1_first[:, r * out_width : (r + 1) * out_width],
+                    bias_sbuf[:, 1],
+                )
+            nl.store(
+                X_out[
+                    0,
+                    1 * c_out_tile : 2 * c_out_tile,
+                    0 : block_rows,
+                    :,
+                ],
+                out_buf1_first,
+            )
 
     else:
         for c_out_idx in nl.affine_range(n_tiles_c_out):
@@ -291,45 +339,90 @@ def conv2d_nki(X, W, bias):
                             X_packed_row,
                         )
 
-            out_buf0_row = nl.ndarray(
-                shape=(c_out_tile, block_rows, out_width),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
-            )
-            for r in nl.affine_range(block_rows):
-                out_buf0_row[:, r, :] = nl.add(
-                    psum0_row[:, r * out_width : (r + 1) * out_width],
-                    bias_sbuf[:, 0],
-                )
-            nl.store(
-                X_out[
-                    0,
-                    0 * c_out_tile : 1 * c_out_tile,
-                    row_start : row_start + block_rows,
-                    :,
-                ],
-                out_buf0_row,
-            )
+            if block_rows % CHUNK_ROWS == 0:
+                for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                    out_chunk0_row = nl.ndarray(
+                        shape=(c_out_tile, CHUNK_ROWS, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for cr in nl.affine_range(CHUNK_ROWS):
+                        r = rr * CHUNK_ROWS + cr
+                        out_chunk0_row[:, cr, :] = nl.add(
+                            psum0_row[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, 0],
+                        )
+                    nl.store(
+                        X_out[
+                            0,
+                            0 * c_out_tile : 1 * c_out_tile,
+                            row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
+                            :,
+                        ],
+                        out_chunk0_row,
+                    )
 
-            out_buf1_row = nl.ndarray(
-                shape=(c_out_tile, block_rows, out_width),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
-            )
-            for r in nl.affine_range(block_rows):
-                out_buf1_row[:, r, :] = nl.add(
-                    psum1_row[:, r * out_width : (r + 1) * out_width],
-                    bias_sbuf[:, 1],
+                for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                    out_chunk1_row = nl.ndarray(
+                        shape=(c_out_tile, CHUNK_ROWS, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for cr in nl.affine_range(CHUNK_ROWS):
+                        r = rr * CHUNK_ROWS + cr
+                        out_chunk1_row[:, cr, :] = nl.add(
+                            psum1_row[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, 1],
+                        )
+                    nl.store(
+                        X_out[
+                            0,
+                            1 * c_out_tile : 2 * c_out_tile,
+                            row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
+                            :,
+                        ],
+                        out_chunk1_row,
+                    )
+            else:
+                out_buf0_row = nl.ndarray(
+                    shape=(c_out_tile, block_rows, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
                 )
-            nl.store(
-                X_out[
-                    0,
-                    1 * c_out_tile : 2 * c_out_tile,
-                    row_start : row_start + block_rows,
-                    :,
-                ],
-                out_buf1_row,
-            )
+                for r in nl.affine_range(block_rows):
+                    out_buf0_row[:, r, :] = nl.add(
+                        psum0_row[:, r * out_width : (r + 1) * out_width],
+                        bias_sbuf[:, 0],
+                    )
+                nl.store(
+                    X_out[
+                        0,
+                        0 * c_out_tile : 1 * c_out_tile,
+                        row_start : row_start + block_rows,
+                        :,
+                    ],
+                    out_buf0_row,
+                )
+
+                out_buf1_row = nl.ndarray(
+                    shape=(c_out_tile, block_rows, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for r in nl.affine_range(block_rows):
+                    out_buf1_row[:, r, :] = nl.add(
+                        psum1_row[:, r * out_width : (r + 1) * out_width],
+                        bias_sbuf[:, 1],
+                    )
+                nl.store(
+                    X_out[
+                        0,
+                        1 * c_out_tile : 2 * c_out_tile,
+                        row_start : row_start + block_rows,
+                        :,
+                    ],
+                    out_buf1_row,
+                )
 
         else:
             for c_out_idx in nl.affine_range(n_tiles_c_out):
@@ -430,45 +523,90 @@ def conv2d_nki(X, W, bias):
                                 X_packed_img,
                             )
 
-                out_buf0_img = nl.ndarray(
-                    shape=(c_out_tile, block_rows, out_width),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    out_buf0_img[:, r, :] = nl.add(
-                        psum0_img[:, r * out_width : (r + 1) * out_width],
-                        bias_sbuf[:, 0],
-                    )
-                nl.store(
-                    X_out[
-                        img,
-                        0 * c_out_tile : 1 * c_out_tile,
-                        row_start : row_start + block_rows,
-                        :,
-                    ],
-                    out_buf0_img,
-                )
+                if block_rows % CHUNK_ROWS == 0:
+                    for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                        out_chunk0_img = nl.ndarray(
+                            shape=(c_out_tile, CHUNK_ROWS, out_width),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for cr in nl.affine_range(CHUNK_ROWS):
+                            r = rr * CHUNK_ROWS + cr
+                            out_chunk0_img[:, cr, :] = nl.add(
+                                psum0_img[:, r * out_width : (r + 1) * out_width],
+                                bias_sbuf[:, 0],
+                            )
+                        nl.store(
+                            X_out[
+                                img,
+                                0 * c_out_tile : 1 * c_out_tile,
+                                row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
+                                :,
+                            ],
+                            out_chunk0_img,
+                        )
 
-                out_buf1_img = nl.ndarray(
-                    shape=(c_out_tile, block_rows, out_width),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    out_buf1_img[:, r, :] = nl.add(
-                        psum1_img[:, r * out_width : (r + 1) * out_width],
-                        bias_sbuf[:, 1],
+                    for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                        out_chunk1_img = nl.ndarray(
+                            shape=(c_out_tile, CHUNK_ROWS, out_width),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for cr in nl.affine_range(CHUNK_ROWS):
+                            r = rr * CHUNK_ROWS + cr
+                            out_chunk1_img[:, cr, :] = nl.add(
+                                psum1_img[:, r * out_width : (r + 1) * out_width],
+                                bias_sbuf[:, 1],
+                            )
+                        nl.store(
+                            X_out[
+                                img,
+                                1 * c_out_tile : 2 * c_out_tile,
+                                row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
+                                :,
+                            ],
+                            out_chunk1_img,
+                        )
+                else:
+                    out_buf0_img = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
                     )
-                nl.store(
-                    X_out[
-                        img,
-                        1 * c_out_tile : 2 * c_out_tile,
-                        row_start : row_start + block_rows,
-                        :,
-                    ],
-                    out_buf1_img,
-                )
+                    for r in nl.affine_range(block_rows):
+                        out_buf0_img[:, r, :] = nl.add(
+                            psum0_img[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, 0],
+                        )
+                    nl.store(
+                        X_out[
+                            img,
+                            0 * c_out_tile : 1 * c_out_tile,
+                            row_start : row_start + block_rows,
+                            :,
+                        ],
+                        out_buf0_img,
+                    )
+
+                    out_buf1_img = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        out_buf1_img[:, r, :] = nl.add(
+                            psum1_img[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, 1],
+                        )
+                    nl.store(
+                        X_out[
+                            img,
+                            1 * c_out_tile : 2 * c_out_tile,
+                            row_start : row_start + block_rows,
+                            :,
+                        ],
+                        out_buf1_img,
+                    )
 
             else:
                 for c_out_idx in nl.affine_range(n_tiles_c_out):
