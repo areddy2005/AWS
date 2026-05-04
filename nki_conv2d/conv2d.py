@@ -133,6 +133,7 @@ def conv2d_nki(X, W, bias):
             buffer=nl.psum,
         )
 
+        # Per tap: 16 explicit row tensor_copies into X_packed_first, then matmuls.
         for i in nl.affine_range(3):
             for j in nl.affine_range(3):
                 X_packed_first = nl.ndarray(
@@ -140,13 +141,54 @@ def conv2d_nki(X, W, bias):
                     dtype=X.dtype,
                     buffer=nl.sbuf,
                 )
-                for group in nl.affine_range(2):
-                    for r_inner in nl.affine_range(8):
-                        r = group * 8 + r_inner
-                        f = group * 256 + r_inner * 32
-                        X_packed_first[:, f : f + 32] = nisa.tensor_copy(
-                            X_band_first[:, r + i, j : j + 32],
-                        )
+                X_packed_first[:, 0:32] = nisa.tensor_copy(
+                    X_band_first[:, i + 0, j : j + 32],
+                )
+                X_packed_first[:, 32:64] = nisa.tensor_copy(
+                    X_band_first[:, i + 1, j : j + 32],
+                )
+                X_packed_first[:, 64:96] = nisa.tensor_copy(
+                    X_band_first[:, i + 2, j : j + 32],
+                )
+                X_packed_first[:, 96:128] = nisa.tensor_copy(
+                    X_band_first[:, i + 3, j : j + 32],
+                )
+                X_packed_first[:, 128:160] = nisa.tensor_copy(
+                    X_band_first[:, i + 4, j : j + 32],
+                )
+                X_packed_first[:, 160:192] = nisa.tensor_copy(
+                    X_band_first[:, i + 5, j : j + 32],
+                )
+                X_packed_first[:, 192:224] = nisa.tensor_copy(
+                    X_band_first[:, i + 6, j : j + 32],
+                )
+                X_packed_first[:, 224:256] = nisa.tensor_copy(
+                    X_band_first[:, i + 7, j : j + 32],
+                )
+                X_packed_first[:, 256:288] = nisa.tensor_copy(
+                    X_band_first[:, i + 8, j : j + 32],
+                )
+                X_packed_first[:, 288:320] = nisa.tensor_copy(
+                    X_band_first[:, i + 9, j : j + 32],
+                )
+                X_packed_first[:, 320:352] = nisa.tensor_copy(
+                    X_band_first[:, i + 10, j : j + 32],
+                )
+                X_packed_first[:, 352:384] = nisa.tensor_copy(
+                    X_band_first[:, i + 11, j : j + 32],
+                )
+                X_packed_first[:, 384:416] = nisa.tensor_copy(
+                    X_band_first[:, i + 12, j : j + 32],
+                )
+                X_packed_first[:, 416:448] = nisa.tensor_copy(
+                    X_band_first[:, i + 13, j : j + 32],
+                )
+                X_packed_first[:, 448:480] = nisa.tensor_copy(
+                    X_band_first[:, i + 14, j : j + 32],
+                )
+                X_packed_first[:, 480:512] = nisa.tensor_copy(
+                    X_band_first[:, i + 15, j : j + 32],
+                )
                 psum0_first += nisa.nc_matmul(w0[:, :, i, j], X_packed_first)
                 psum1_first += nisa.nc_matmul(w1[:, :, i, j], X_packed_first)
 
@@ -190,7 +232,7 @@ def conv2d_nki(X, W, bias):
             out1_first,
         )
 
-        for rb in nl.affine_range(1, 2):
+        for rb in nl.sequential_range(1, 2):
             row_start = rb * 16
 
             X_band = nl.ndarray(
@@ -218,6 +260,7 @@ def conv2d_nki(X, W, bias):
                 buffer=nl.psum,
             )
 
+            # Per tap: 16 explicit row tensor_copies into X_packed, then matmuls.
             for i in nl.affine_range(3):
                 for j in nl.affine_range(3):
                     X_packed = nl.ndarray(
@@ -225,13 +268,54 @@ def conv2d_nki(X, W, bias):
                         dtype=X.dtype,
                         buffer=nl.sbuf,
                     )
-                    for group in nl.affine_range(2):
-                        for r_inner in nl.affine_range(8):
-                            r = group * 8 + r_inner
-                            f = group * 256 + r_inner * 32
-                            X_packed[:, f : f + 32] = nisa.tensor_copy(
-                                X_band[:, r + i, j : j + 32],
-                            )
+                    X_packed[:, 0:32] = nisa.tensor_copy(
+                        X_band[:, i + 0, j : j + 32],
+                    )
+                    X_packed[:, 32:64] = nisa.tensor_copy(
+                        X_band[:, i + 1, j : j + 32],
+                    )
+                    X_packed[:, 64:96] = nisa.tensor_copy(
+                        X_band[:, i + 2, j : j + 32],
+                    )
+                    X_packed[:, 96:128] = nisa.tensor_copy(
+                        X_band[:, i + 3, j : j + 32],
+                    )
+                    X_packed[:, 128:160] = nisa.tensor_copy(
+                        X_band[:, i + 4, j : j + 32],
+                    )
+                    X_packed[:, 160:192] = nisa.tensor_copy(
+                        X_band[:, i + 5, j : j + 32],
+                    )
+                    X_packed[:, 192:224] = nisa.tensor_copy(
+                        X_band[:, i + 6, j : j + 32],
+                    )
+                    X_packed[:, 224:256] = nisa.tensor_copy(
+                        X_band[:, i + 7, j : j + 32],
+                    )
+                    X_packed[:, 256:288] = nisa.tensor_copy(
+                        X_band[:, i + 8, j : j + 32],
+                    )
+                    X_packed[:, 288:320] = nisa.tensor_copy(
+                        X_band[:, i + 9, j : j + 32],
+                    )
+                    X_packed[:, 320:352] = nisa.tensor_copy(
+                        X_band[:, i + 10, j : j + 32],
+                    )
+                    X_packed[:, 352:384] = nisa.tensor_copy(
+                        X_band[:, i + 11, j : j + 32],
+                    )
+                    X_packed[:, 384:416] = nisa.tensor_copy(
+                        X_band[:, i + 12, j : j + 32],
+                    )
+                    X_packed[:, 416:448] = nisa.tensor_copy(
+                        X_band[:, i + 13, j : j + 32],
+                    )
+                    X_packed[:, 448:480] = nisa.tensor_copy(
+                        X_band[:, i + 14, j : j + 32],
+                    )
+                    X_packed[:, 480:512] = nisa.tensor_copy(
+                        X_band[:, i + 15, j : j + 32],
+                    )
                     psum0 += nisa.nc_matmul(w0[:, :, i, j], X_packed)
                     psum1 += nisa.nc_matmul(w1[:, :, i, j], X_packed)
 
@@ -275,8 +359,8 @@ def conv2d_nki(X, W, bias):
                 out1,
             )
 
-        for img in nl.affine_range(1, 4):
-            for rb in nl.affine_range(0, 2):
+        for img in nl.sequential_range(1, 4):
+            for rb in nl.sequential_range(0, 2):
                 row_start = rb * 16
 
                 X_band = nl.ndarray(
@@ -304,7 +388,7 @@ def conv2d_nki(X, W, bias):
                     buffer=nl.psum,
                 )
 
-                # Per tap: 2x8 row tiling into X_packed, then both matmuls (same as img=0 blocks).
+                # Per tap: 16 explicit row tensor_copies into X_packed, then both matmuls.
                 for i in nl.affine_range(3):
                     for j in nl.affine_range(3):
                         X_packed = nl.ndarray(
@@ -312,13 +396,54 @@ def conv2d_nki(X, W, bias):
                             dtype=X.dtype,
                             buffer=nl.sbuf,
                         )
-                        for group in nl.affine_range(2):
-                            for r_inner in nl.affine_range(8):
-                                r = group * 8 + r_inner
-                                f = group * 256 + r_inner * 32
-                                X_packed[:, f : f + 32] = nisa.tensor_copy(
-                                    X_band[:, r + i, j : j + 32],
-                                )
+                        X_packed[:, 0:32] = nisa.tensor_copy(
+                            X_band[:, i + 0, j : j + 32],
+                        )
+                        X_packed[:, 32:64] = nisa.tensor_copy(
+                            X_band[:, i + 1, j : j + 32],
+                        )
+                        X_packed[:, 64:96] = nisa.tensor_copy(
+                            X_band[:, i + 2, j : j + 32],
+                        )
+                        X_packed[:, 96:128] = nisa.tensor_copy(
+                            X_band[:, i + 3, j : j + 32],
+                        )
+                        X_packed[:, 128:160] = nisa.tensor_copy(
+                            X_band[:, i + 4, j : j + 32],
+                        )
+                        X_packed[:, 160:192] = nisa.tensor_copy(
+                            X_band[:, i + 5, j : j + 32],
+                        )
+                        X_packed[:, 192:224] = nisa.tensor_copy(
+                            X_band[:, i + 6, j : j + 32],
+                        )
+                        X_packed[:, 224:256] = nisa.tensor_copy(
+                            X_band[:, i + 7, j : j + 32],
+                        )
+                        X_packed[:, 256:288] = nisa.tensor_copy(
+                            X_band[:, i + 8, j : j + 32],
+                        )
+                        X_packed[:, 288:320] = nisa.tensor_copy(
+                            X_band[:, i + 9, j : j + 32],
+                        )
+                        X_packed[:, 320:352] = nisa.tensor_copy(
+                            X_band[:, i + 10, j : j + 32],
+                        )
+                        X_packed[:, 352:384] = nisa.tensor_copy(
+                            X_band[:, i + 11, j : j + 32],
+                        )
+                        X_packed[:, 384:416] = nisa.tensor_copy(
+                            X_band[:, i + 12, j : j + 32],
+                        )
+                        X_packed[:, 416:448] = nisa.tensor_copy(
+                            X_band[:, i + 13, j : j + 32],
+                        )
+                        X_packed[:, 448:480] = nisa.tensor_copy(
+                            X_band[:, i + 14, j : j + 32],
+                        )
+                        X_packed[:, 480:512] = nisa.tensor_copy(
+                            X_band[:, i + 15, j : j + 32],
+                        )
                         psum0 += nisa.nc_matmul(w0[:, :, i, j], X_packed)
                         psum1 += nisa.nc_matmul(w1[:, :, i, j], X_packed)
 
