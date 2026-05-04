@@ -119,52 +119,61 @@ def conv2d_nki(X, W, bias):
         )
         for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
             if K == 3:
-                # All w1 taps for this c_in tile (then pure w0 / TE work).
-                w1[:, :, c_in_tile_idx, 0, 0] = nl.load_transpose2d(
+                # All w1 taps: nl.load [out,in] from HBM, nc_transpose -> [in,out] for w1 SBUF.
+                tmp_w1 = nl.load(
                     W[1 * c_out_tile : 2 * c_out_tile,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                       0, 0]
                 )
-                w1[:, :, c_in_tile_idx, 0, 1] = nl.load_transpose2d(
+                w1[:, :, c_in_tile_idx, 0, 0] = nisa.nc_transpose(tmp_w1)
+                tmp_w1 = nl.load(
                     W[1 * c_out_tile : 2 * c_out_tile,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                       0, 1]
                 )
-                w1[:, :, c_in_tile_idx, 0, 2] = nl.load_transpose2d(
+                w1[:, :, c_in_tile_idx, 0, 1] = nisa.nc_transpose(tmp_w1)
+                tmp_w1 = nl.load(
                     W[1 * c_out_tile : 2 * c_out_tile,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                       0, 2]
                 )
-                w1[:, :, c_in_tile_idx, 1, 0] = nl.load_transpose2d(
+                w1[:, :, c_in_tile_idx, 0, 2] = nisa.nc_transpose(tmp_w1)
+                tmp_w1 = nl.load(
                     W[1 * c_out_tile : 2 * c_out_tile,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                       1, 0]
                 )
-                w1[:, :, c_in_tile_idx, 1, 1] = nl.load_transpose2d(
+                w1[:, :, c_in_tile_idx, 1, 0] = nisa.nc_transpose(tmp_w1)
+                tmp_w1 = nl.load(
                     W[1 * c_out_tile : 2 * c_out_tile,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                       1, 1]
                 )
-                w1[:, :, c_in_tile_idx, 1, 2] = nl.load_transpose2d(
+                w1[:, :, c_in_tile_idx, 1, 1] = nisa.nc_transpose(tmp_w1)
+                tmp_w1 = nl.load(
                     W[1 * c_out_tile : 2 * c_out_tile,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                       1, 2]
                 )
-                w1[:, :, c_in_tile_idx, 2, 0] = nl.load_transpose2d(
+                w1[:, :, c_in_tile_idx, 1, 2] = nisa.nc_transpose(tmp_w1)
+                tmp_w1 = nl.load(
                     W[1 * c_out_tile : 2 * c_out_tile,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                       2, 0]
                 )
-                w1[:, :, c_in_tile_idx, 2, 1] = nl.load_transpose2d(
+                w1[:, :, c_in_tile_idx, 2, 0] = nisa.nc_transpose(tmp_w1)
+                tmp_w1 = nl.load(
                     W[1 * c_out_tile : 2 * c_out_tile,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                       2, 1]
                 )
-                w1[:, :, c_in_tile_idx, 2, 2] = nl.load_transpose2d(
+                w1[:, :, c_in_tile_idx, 2, 1] = nisa.nc_transpose(tmp_w1)
+                tmp_w1 = nl.load(
                     W[1 * c_out_tile : 2 * c_out_tile,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                       2, 2]
                 )
+                w1[:, :, c_in_tile_idx, 2, 2] = nisa.nc_transpose(tmp_w1)
                 # w0 row 0
                 X_packed = nl.ndarray(
                     shape=(c_in_tile, F_m),
@@ -297,11 +306,12 @@ def conv2d_nki(X, W, bias):
             elif K == 5:
                 for i in nl.affine_range(K):
                     for j in nl.affine_range(K):
-                        w1[:, :, c_in_tile_idx, i, j] = nl.load_transpose2d(
+                        tmp_w1 = nl.load(
                             W[1 * c_out_tile : 2 * c_out_tile,
                               c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                               i, j]
                         )
+                        w1[:, :, c_in_tile_idx, i, j] = nisa.nc_transpose(tmp_w1)
                 for i in nl.affine_range(K):
                     for j in nl.affine_range(K):
                         X_packed = nl.ndarray(
@@ -335,11 +345,12 @@ def conv2d_nki(X, W, bias):
                             w0[:, :, c_in_tile_idx, i, j],
                             X_packed,
                         )
-                        w1[:, :, c_in_tile_idx, i, j] = nl.load_transpose2d(
+                        tmp_w1 = nl.load(
                             W[1 * c_out_tile : 2 * c_out_tile,
                               c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
                               i, j]
                         )
+                        w1[:, :, c_in_tile_idx, i, j] = nisa.nc_transpose(tmp_w1)
 
         out_buf = nl.ndarray(
             shape=(c_out_tile, block_rows, out_width),
