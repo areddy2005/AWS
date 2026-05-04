@@ -69,8 +69,7 @@ def conv2d_nki(X, W, bias):
     )
 
     if n_tiles_c_out == 2:
-        # out_channels == 256: split w into w0/w1; preload w0 only; pipeline w1
-        # loads into first c_out0 reduction. Generic (i,j) only (no K unroll here).
+        # out_channels == 256: w0/w1 in SBUF. K==5: slab nl.load + nc_transpose per tap (no transpose-DMA).
         w0 = nl.ndarray(
             shape=(c_in_tile, c_out_tile, n_tiles_c_in, K, K),
             dtype=W.dtype,
@@ -82,13 +81,51 @@ def conv2d_nki(X, W, bias):
             buffer=nl.sbuf,
         )
         for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-            for i in nl.affine_range(K):
-                for j in nl.affine_range(K):
-                    w0[:, :, c_in_tile_idx, i, j] = nl.load_transpose2d(
-                        W[0 * c_out_tile : 1 * c_out_tile,
-                          c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                          i, j]
-                    )
+            if K == 5:
+                W0_slab = nl.ndarray(
+                    shape=(c_out_tile, c_in_tile, K, K),
+                    dtype=W.dtype,
+                    buffer=nl.sbuf,
+                )
+                W0_slab[:, :, :, :] = nl.load(
+                    W[0 * c_out_tile : 1 * c_out_tile,
+                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                      0:K,
+                      0:K]
+                )
+                w0[:, :, c_in_tile_idx, 0, 0] = nisa.nc_transpose(W0_slab[:, :, 0, 0])
+                w0[:, :, c_in_tile_idx, 0, 1] = nisa.nc_transpose(W0_slab[:, :, 0, 1])
+                w0[:, :, c_in_tile_idx, 0, 2] = nisa.nc_transpose(W0_slab[:, :, 0, 2])
+                w0[:, :, c_in_tile_idx, 0, 3] = nisa.nc_transpose(W0_slab[:, :, 0, 3])
+                w0[:, :, c_in_tile_idx, 0, 4] = nisa.nc_transpose(W0_slab[:, :, 0, 4])
+                w0[:, :, c_in_tile_idx, 1, 0] = nisa.nc_transpose(W0_slab[:, :, 1, 0])
+                w0[:, :, c_in_tile_idx, 1, 1] = nisa.nc_transpose(W0_slab[:, :, 1, 1])
+                w0[:, :, c_in_tile_idx, 1, 2] = nisa.nc_transpose(W0_slab[:, :, 1, 2])
+                w0[:, :, c_in_tile_idx, 1, 3] = nisa.nc_transpose(W0_slab[:, :, 1, 3])
+                w0[:, :, c_in_tile_idx, 1, 4] = nisa.nc_transpose(W0_slab[:, :, 1, 4])
+                w0[:, :, c_in_tile_idx, 2, 0] = nisa.nc_transpose(W0_slab[:, :, 2, 0])
+                w0[:, :, c_in_tile_idx, 2, 1] = nisa.nc_transpose(W0_slab[:, :, 2, 1])
+                w0[:, :, c_in_tile_idx, 2, 2] = nisa.nc_transpose(W0_slab[:, :, 2, 2])
+                w0[:, :, c_in_tile_idx, 2, 3] = nisa.nc_transpose(W0_slab[:, :, 2, 3])
+                w0[:, :, c_in_tile_idx, 2, 4] = nisa.nc_transpose(W0_slab[:, :, 2, 4])
+                w0[:, :, c_in_tile_idx, 3, 0] = nisa.nc_transpose(W0_slab[:, :, 3, 0])
+                w0[:, :, c_in_tile_idx, 3, 1] = nisa.nc_transpose(W0_slab[:, :, 3, 1])
+                w0[:, :, c_in_tile_idx, 3, 2] = nisa.nc_transpose(W0_slab[:, :, 3, 2])
+                w0[:, :, c_in_tile_idx, 3, 3] = nisa.nc_transpose(W0_slab[:, :, 3, 3])
+                w0[:, :, c_in_tile_idx, 3, 4] = nisa.nc_transpose(W0_slab[:, :, 3, 4])
+                w0[:, :, c_in_tile_idx, 4, 0] = nisa.nc_transpose(W0_slab[:, :, 4, 0])
+                w0[:, :, c_in_tile_idx, 4, 1] = nisa.nc_transpose(W0_slab[:, :, 4, 1])
+                w0[:, :, c_in_tile_idx, 4, 2] = nisa.nc_transpose(W0_slab[:, :, 4, 2])
+                w0[:, :, c_in_tile_idx, 4, 3] = nisa.nc_transpose(W0_slab[:, :, 4, 3])
+                w0[:, :, c_in_tile_idx, 4, 4] = nisa.nc_transpose(W0_slab[:, :, 4, 4])
+            else:
+                for i in nl.affine_range(K):
+                    for j in nl.affine_range(K):
+                        w0[:, :, c_in_tile_idx, i, j] = nl.load_transpose2d(
+                            W[0 * c_out_tile : 1 * c_out_tile,
+                              c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                              i, j]
+                        )
 
         # (c_out_tile, 1): NKI rejects 1D bias0[:] = nl.load(...); match bias_sbuf column layout.
         bias0 = nl.ndarray(shape=(c_out_tile, 1), dtype=bias.dtype, buffer=nl.sbuf)
@@ -96,7 +133,7 @@ def conv2d_nki(X, W, bias):
         bias1 = nl.ndarray(shape=(c_out_tile, 1), dtype=bias.dtype, buffer=nl.sbuf)
         bias1[:, 0] = nl.load(bias[1 * c_out_tile : 2 * c_out_tile])
 
-        # Prologue: K==3 all w1 then w0; K==5 out256 uses one W1 HBM slab + nc_transpose per tap.
+        # Prologue: K==3 all w1 then w0; K==5: W0_slab then W1_slab (each discarded after filling w0/w1).
         img0 = 0
         row_start_p = 0
         X_bands = nl.ndarray(
