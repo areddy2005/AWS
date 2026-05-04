@@ -551,7 +551,7 @@ def conv2d_nki(X, W, bias):
                     )
 
     else:
-        # Stage all weights into SBUF (global w), then known-good main loop with K unroll.
+        # Stage weights into SBUF. K in {3,5}: one contiguous nl.load per (c_out,c_in) slab + nc_transpose per tap.
         w = nl.ndarray(
             shape=(c_in_tile, c_out_tile, n_tiles_c_out, n_tiles_c_in, filter_height, filter_width),
             dtype=W.dtype,
@@ -559,13 +559,72 @@ def conv2d_nki(X, W, bias):
         )
         for c_out_tile_idx in nl.affine_range(n_tiles_c_out):
             for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-                for i in nl.affine_range(filter_height):
-                    for j in nl.affine_range(filter_width):
-                        w[:, :, c_out_tile_idx, c_in_tile_idx, i, j] = nl.load_transpose2d(
-                            W[c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
-                              c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                              i, j]
-                        )
+                if K == 3:
+                    W_slab = nl.ndarray(
+                        shape=(c_out_tile, c_in_tile, K, K),
+                        dtype=W.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    W_slab[:, :, :, :] = nl.load(
+                        W[c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
+                          c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                          0:K,
+                          0:K]
+                    )
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 0, 0] = nisa.nc_transpose(W_slab[:, :, 0, 0])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 0, 1] = nisa.nc_transpose(W_slab[:, :, 0, 1])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 0, 2] = nisa.nc_transpose(W_slab[:, :, 0, 2])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 1, 0] = nisa.nc_transpose(W_slab[:, :, 1, 0])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 1, 1] = nisa.nc_transpose(W_slab[:, :, 1, 1])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 1, 2] = nisa.nc_transpose(W_slab[:, :, 1, 2])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 2, 0] = nisa.nc_transpose(W_slab[:, :, 2, 0])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 2, 1] = nisa.nc_transpose(W_slab[:, :, 2, 1])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 2, 2] = nisa.nc_transpose(W_slab[:, :, 2, 2])
+                elif K == 5:
+                    W_slab = nl.ndarray(
+                        shape=(c_out_tile, c_in_tile, K, K),
+                        dtype=W.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    W_slab[:, :, :, :] = nl.load(
+                        W[c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
+                          c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                          0:K,
+                          0:K]
+                    )
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 0, 0] = nisa.nc_transpose(W_slab[:, :, 0, 0])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 0, 1] = nisa.nc_transpose(W_slab[:, :, 0, 1])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 0, 2] = nisa.nc_transpose(W_slab[:, :, 0, 2])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 0, 3] = nisa.nc_transpose(W_slab[:, :, 0, 3])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 0, 4] = nisa.nc_transpose(W_slab[:, :, 0, 4])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 1, 0] = nisa.nc_transpose(W_slab[:, :, 1, 0])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 1, 1] = nisa.nc_transpose(W_slab[:, :, 1, 1])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 1, 2] = nisa.nc_transpose(W_slab[:, :, 1, 2])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 1, 3] = nisa.nc_transpose(W_slab[:, :, 1, 3])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 1, 4] = nisa.nc_transpose(W_slab[:, :, 1, 4])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 2, 0] = nisa.nc_transpose(W_slab[:, :, 2, 0])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 2, 1] = nisa.nc_transpose(W_slab[:, :, 2, 1])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 2, 2] = nisa.nc_transpose(W_slab[:, :, 2, 2])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 2, 3] = nisa.nc_transpose(W_slab[:, :, 2, 3])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 2, 4] = nisa.nc_transpose(W_slab[:, :, 2, 4])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 3, 0] = nisa.nc_transpose(W_slab[:, :, 3, 0])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 3, 1] = nisa.nc_transpose(W_slab[:, :, 3, 1])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 3, 2] = nisa.nc_transpose(W_slab[:, :, 3, 2])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 3, 3] = nisa.nc_transpose(W_slab[:, :, 3, 3])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 3, 4] = nisa.nc_transpose(W_slab[:, :, 3, 4])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 4, 0] = nisa.nc_transpose(W_slab[:, :, 4, 0])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 4, 1] = nisa.nc_transpose(W_slab[:, :, 4, 1])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 4, 2] = nisa.nc_transpose(W_slab[:, :, 4, 2])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 4, 3] = nisa.nc_transpose(W_slab[:, :, 4, 3])
+                    w[:, :, c_out_tile_idx, c_in_tile_idx, 4, 4] = nisa.nc_transpose(W_slab[:, :, 4, 4])
+                else:
+                    for i in nl.affine_range(filter_height):
+                        for j in nl.affine_range(filter_width):
+                            w[:, :, c_out_tile_idx, c_in_tile_idx, i, j] = nl.load_transpose2d(
+                                W[c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
+                                  c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                                  i, j]
+                            )
 
         bias_sbuf = nl.ndarray(
             shape=(c_out_tile, n_tiles_c_out),
