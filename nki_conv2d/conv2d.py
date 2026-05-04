@@ -121,12 +121,12 @@ def conv2d_nki(X, W, bias):
     # First spatial block (img=0, row_block=0): prefetched X_bands_first overlaps weight/bias staging.
     row_start = 0
     if n_tiles_c_out == 2:
-        psum0 = nl.zeros(
+        psum0_first = nl.zeros(
             shape=(c_out_tile, F_m),
             dtype=nl.float32,
             buffer=nl.psum,
         )
-        psum1 = nl.zeros(
+        psum1_first = nl.zeros(
             shape=(c_out_tile, F_m),
             dtype=nl.float32,
             buffer=nl.psum,
@@ -135,32 +135,32 @@ def conv2d_nki(X, W, bias):
         for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
             for i in nl.affine_range(K):
                 for j in nl.affine_range(K):
-                    X_packed = nl.ndarray(
+                    X_packed_first_block = nl.ndarray(
                         shape=(c_in_tile, F_m),
                         dtype=X.dtype,
                         buffer=nl.sbuf,
                     )
                     for r in nl.affine_range(block_rows):
-                        X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                        X_packed_first_block[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
                             X_bands_first[:, c_in_tile_idx, r + i, j : j + out_width],
                         )
-                    psum0 += nisa.nc_matmul(
+                    psum0_first += nisa.nc_matmul(
                         w[:, :, 0, c_in_tile_idx, i, j],
-                        X_packed,
+                        X_packed_first_block,
                     )
-                    psum1 += nisa.nc_matmul(
+                    psum1_first += nisa.nc_matmul(
                         w[:, :, 1, c_in_tile_idx, i, j],
-                        X_packed,
+                        X_packed_first_block,
                     )
 
-        out_buf0 = nl.ndarray(
+        out_buf0_first = nl.ndarray(
             shape=(c_out_tile, block_rows, out_width),
             dtype=X.dtype,
             buffer=nl.sbuf,
         )
         for r in nl.affine_range(block_rows):
-            out_buf0[:, r, :] = nl.add(
-                psum0[:, r * out_width : (r + 1) * out_width],
+            out_buf0_first[:, r, :] = nl.add(
+                psum0_first[:, r * out_width : (r + 1) * out_width],
                 bias_sbuf[:, 0],
             )
         nl.store(
@@ -170,17 +170,17 @@ def conv2d_nki(X, W, bias):
                 0 : block_rows,
                 :,
             ],
-            out_buf0,
+            out_buf0_first,
         )
 
-        out_buf1 = nl.ndarray(
+        out_buf1_first = nl.ndarray(
             shape=(c_out_tile, block_rows, out_width),
             dtype=X.dtype,
             buffer=nl.sbuf,
         )
         for r in nl.affine_range(block_rows):
-            out_buf1[:, r, :] = nl.add(
-                psum1[:, r * out_width : (r + 1) * out_width],
+            out_buf1_first[:, r, :] = nl.add(
+                psum1_first[:, r * out_width : (r + 1) * out_width],
                 bias_sbuf[:, 1],
             )
         nl.store(
@@ -190,12 +190,12 @@ def conv2d_nki(X, W, bias):
                 0 : block_rows,
                 :,
             ],
-            out_buf1,
+            out_buf1_first,
         )
 
     else:
         for c_out_idx in nl.affine_range(n_tiles_c_out):
-            psum_packed = nl.zeros(
+            psum_packed_first = nl.zeros(
                 shape=(c_out_tile, F_m),
                 dtype=nl.float32,
                 buffer=nl.psum,
@@ -204,28 +204,28 @@ def conv2d_nki(X, W, bias):
             for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                 for i in nl.affine_range(K):
                     for j in nl.affine_range(K):
-                        X_packed = nl.ndarray(
+                        X_packed_first_block = nl.ndarray(
                             shape=(c_in_tile, F_m),
                             dtype=X.dtype,
                             buffer=nl.sbuf,
                         )
                         for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                            X_packed_first_block[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
                                 X_bands_first[:, c_in_tile_idx, r + i, j : j + out_width],
                             )
-                        psum_packed += nisa.nc_matmul(
+                        psum_packed_first += nisa.nc_matmul(
                             w[:, :, c_out_idx, c_in_tile_idx, i, j],
-                            X_packed,
+                            X_packed_first_block,
                         )
 
-            out_buf = nl.ndarray(
+            out_buf_first = nl.ndarray(
                 shape=(c_out_tile, block_rows, out_width),
                 dtype=X.dtype,
                 buffer=nl.sbuf,
             )
             for r in nl.affine_range(block_rows):
-                out_buf[:, r, :] = nl.add(
-                    psum_packed[:, r * out_width : (r + 1) * out_width],
+                out_buf_first[:, r, :] = nl.add(
+                    psum_packed_first[:, r * out_width : (r + 1) * out_width],
                     bias_sbuf[:, c_out_idx],
                 )
             nl.store(
@@ -235,7 +235,7 @@ def conv2d_nki(X, W, bias):
                     0 : block_rows,
                     :,
                 ],
-                out_buf,
+                out_buf_first,
             )
 
     # Remaining row blocks for img=0 (sequential_range(1, n_row_blocks) is empty if n_row_blocks==1)
@@ -259,12 +259,12 @@ def conv2d_nki(X, W, bias):
             )
 
         if n_tiles_c_out == 2:
-            psum0 = nl.zeros(
+            psum0_row = nl.zeros(
                 shape=(c_out_tile, F_m),
                 dtype=nl.float32,
                 buffer=nl.psum,
             )
-            psum1 = nl.zeros(
+            psum1_row = nl.zeros(
                 shape=(c_out_tile, F_m),
                 dtype=nl.float32,
                 buffer=nl.psum,
@@ -273,32 +273,32 @@ def conv2d_nki(X, W, bias):
             for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                 for i in nl.affine_range(K):
                     for j in nl.affine_range(K):
-                        X_packed = nl.ndarray(
+                        X_packed_row = nl.ndarray(
                             shape=(c_in_tile, F_m),
                             dtype=X.dtype,
                             buffer=nl.sbuf,
                         )
                         for r in nl.affine_range(block_rows):
-                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                            X_packed_row[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
                                 X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
                             )
-                        psum0 += nisa.nc_matmul(
+                        psum0_row += nisa.nc_matmul(
                             w[:, :, 0, c_in_tile_idx, i, j],
-                            X_packed,
+                            X_packed_row,
                         )
-                        psum1 += nisa.nc_matmul(
+                        psum1_row += nisa.nc_matmul(
                             w[:, :, 1, c_in_tile_idx, i, j],
-                            X_packed,
+                            X_packed_row,
                         )
 
-            out_buf0 = nl.ndarray(
+            out_buf0_row = nl.ndarray(
                 shape=(c_out_tile, block_rows, out_width),
                 dtype=X.dtype,
                 buffer=nl.sbuf,
             )
             for r in nl.affine_range(block_rows):
-                out_buf0[:, r, :] = nl.add(
-                    psum0[:, r * out_width : (r + 1) * out_width],
+                out_buf0_row[:, r, :] = nl.add(
+                    psum0_row[:, r * out_width : (r + 1) * out_width],
                     bias_sbuf[:, 0],
                 )
             nl.store(
@@ -308,17 +308,17 @@ def conv2d_nki(X, W, bias):
                     row_start : row_start + block_rows,
                     :,
                 ],
-                out_buf0,
+                out_buf0_row,
             )
 
-            out_buf1 = nl.ndarray(
+            out_buf1_row = nl.ndarray(
                 shape=(c_out_tile, block_rows, out_width),
                 dtype=X.dtype,
                 buffer=nl.sbuf,
             )
             for r in nl.affine_range(block_rows):
-                out_buf1[:, r, :] = nl.add(
-                    psum1[:, r * out_width : (r + 1) * out_width],
+                out_buf1_row[:, r, :] = nl.add(
+                    psum1_row[:, r * out_width : (r + 1) * out_width],
                     bias_sbuf[:, 1],
                 )
             nl.store(
@@ -328,12 +328,12 @@ def conv2d_nki(X, W, bias):
                     row_start : row_start + block_rows,
                     :,
                 ],
-                out_buf1,
+                out_buf1_row,
             )
 
         else:
             for c_out_idx in nl.affine_range(n_tiles_c_out):
-                psum_packed = nl.zeros(
+                psum_packed_row = nl.zeros(
                     shape=(c_out_tile, F_m),
                     dtype=nl.float32,
                     buffer=nl.psum,
@@ -342,28 +342,28 @@ def conv2d_nki(X, W, bias):
                 for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                     for i in nl.affine_range(K):
                         for j in nl.affine_range(K):
-                            X_packed = nl.ndarray(
+                            X_packed_row = nl.ndarray(
                                 shape=(c_in_tile, F_m),
                                 dtype=X.dtype,
                                 buffer=nl.sbuf,
                             )
                             for r in nl.affine_range(block_rows):
-                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                X_packed_row[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
                                     X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
                                 )
-                            psum_packed += nisa.nc_matmul(
+                            psum_packed_row += nisa.nc_matmul(
                                 w[:, :, c_out_idx, c_in_tile_idx, i, j],
-                                X_packed,
+                                X_packed_row,
                             )
 
-                out_buf = nl.ndarray(
+                out_buf_row = nl.ndarray(
                     shape=(c_out_tile, block_rows, out_width),
                     dtype=X.dtype,
                     buffer=nl.sbuf,
                 )
                 for r in nl.affine_range(block_rows):
-                    out_buf[:, r, :] = nl.add(
-                        psum_packed[:, r * out_width : (r + 1) * out_width],
+                    out_buf_row[:, r, :] = nl.add(
+                        psum_packed_row[:, r * out_width : (r + 1) * out_width],
                         bias_sbuf[:, c_out_idx],
                     )
                 nl.store(
@@ -373,7 +373,7 @@ def conv2d_nki(X, W, bias):
                         row_start : row_start + block_rows,
                         :,
                     ],
-                    out_buf,
+                    out_buf_row,
                 )
 
     # All row blocks for img >= 1 (outer loop empty if batch_size==1)
@@ -398,12 +398,12 @@ def conv2d_nki(X, W, bias):
                 )
 
             if n_tiles_c_out == 2:
-                psum0 = nl.zeros(
+                psum0_img = nl.zeros(
                     shape=(c_out_tile, F_m),
                     dtype=nl.float32,
                     buffer=nl.psum,
                 )
-                psum1 = nl.zeros(
+                psum1_img = nl.zeros(
                     shape=(c_out_tile, F_m),
                     dtype=nl.float32,
                     buffer=nl.psum,
@@ -412,32 +412,32 @@ def conv2d_nki(X, W, bias):
                 for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                     for i in nl.affine_range(K):
                         for j in nl.affine_range(K):
-                            X_packed = nl.ndarray(
+                            X_packed_img = nl.ndarray(
                                 shape=(c_in_tile, F_m),
                                 dtype=X.dtype,
                                 buffer=nl.sbuf,
                             )
                             for r in nl.affine_range(block_rows):
-                                X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                X_packed_img[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
                                     X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
                                 )
-                            psum0 += nisa.nc_matmul(
+                            psum0_img += nisa.nc_matmul(
                                 w[:, :, 0, c_in_tile_idx, i, j],
-                                X_packed,
+                                X_packed_img,
                             )
-                            psum1 += nisa.nc_matmul(
+                            psum1_img += nisa.nc_matmul(
                                 w[:, :, 1, c_in_tile_idx, i, j],
-                                X_packed,
+                                X_packed_img,
                             )
 
-                out_buf0 = nl.ndarray(
+                out_buf0_img = nl.ndarray(
                     shape=(c_out_tile, block_rows, out_width),
                     dtype=X.dtype,
                     buffer=nl.sbuf,
                 )
                 for r in nl.affine_range(block_rows):
-                    out_buf0[:, r, :] = nl.add(
-                        psum0[:, r * out_width : (r + 1) * out_width],
+                    out_buf0_img[:, r, :] = nl.add(
+                        psum0_img[:, r * out_width : (r + 1) * out_width],
                         bias_sbuf[:, 0],
                     )
                 nl.store(
@@ -447,17 +447,17 @@ def conv2d_nki(X, W, bias):
                         row_start : row_start + block_rows,
                         :,
                     ],
-                    out_buf0,
+                    out_buf0_img,
                 )
 
-                out_buf1 = nl.ndarray(
+                out_buf1_img = nl.ndarray(
                     shape=(c_out_tile, block_rows, out_width),
                     dtype=X.dtype,
                     buffer=nl.sbuf,
                 )
                 for r in nl.affine_range(block_rows):
-                    out_buf1[:, r, :] = nl.add(
-                        psum1[:, r * out_width : (r + 1) * out_width],
+                    out_buf1_img[:, r, :] = nl.add(
+                        psum1_img[:, r * out_width : (r + 1) * out_width],
                         bias_sbuf[:, 1],
                     )
                 nl.store(
@@ -467,12 +467,12 @@ def conv2d_nki(X, W, bias):
                         row_start : row_start + block_rows,
                         :,
                     ],
-                    out_buf1,
+                    out_buf1_img,
                 )
 
             else:
                 for c_out_idx in nl.affine_range(n_tiles_c_out):
-                    psum_packed = nl.zeros(
+                    psum_packed_img = nl.zeros(
                         shape=(c_out_tile, F_m),
                         dtype=nl.float32,
                         buffer=nl.psum,
@@ -481,28 +481,28 @@ def conv2d_nki(X, W, bias):
                     for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
                         for i in nl.affine_range(K):
                             for j in nl.affine_range(K):
-                                X_packed = nl.ndarray(
+                                X_packed_img = nl.ndarray(
                                     shape=(c_in_tile, F_m),
                                     dtype=X.dtype,
                                     buffer=nl.sbuf,
                                 )
                                 for r in nl.affine_range(block_rows):
-                                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_packed_img[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
                                         X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
                                     )
-                                psum_packed += nisa.nc_matmul(
+                                psum_packed_img += nisa.nc_matmul(
                                     w[:, :, c_out_idx, c_in_tile_idx, i, j],
-                                    X_packed,
+                                    X_packed_img,
                                 )
 
-                    out_buf = nl.ndarray(
+                    out_buf_img = nl.ndarray(
                         shape=(c_out_tile, block_rows, out_width),
                         dtype=X.dtype,
                         buffer=nl.sbuf,
                     )
                     for r in nl.affine_range(block_rows):
-                        out_buf[:, r, :] = nl.add(
-                            psum_packed[:, r * out_width : (r + 1) * out_width],
+                        out_buf_img[:, r, :] = nl.add(
+                            psum_packed_img[:, r * out_width : (r + 1) * out_width],
                             bias_sbuf[:, c_out_idx],
                         )
                     nl.store(
@@ -512,7 +512,7 @@ def conv2d_nki(X, W, bias):
                             row_start : row_start + block_rows,
                             :,
                         ],
-                        out_buf,
+                        out_buf_img,
                     )
 
     return X_out
