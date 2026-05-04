@@ -40,6 +40,164 @@ def conv2d_nki(X, W, bias):
 
     K = filter_height
 
+    use_fastpath = (
+        batch_size == 4
+        and in_channels == 128
+        and out_channels == 256
+        and input_height == 34
+        and input_width == 34
+        and K == 3
+        and X.dtype == nl.float32
+    )
+
+    if use_fastpath:
+        # Shape-specialized in128_out256 3x3 34x34 batch4: literal K/F_m/block_rows, w0/w1, X_band.
+        X_out = nl.ndarray(
+            shape=(4, 256, 32, 32),
+            dtype=X.dtype,
+            buffer=nl.hbm,
+        )
+
+        W0_slab = nl.ndarray(
+            shape=(128, 128, 3, 3),
+            dtype=W.dtype,
+            buffer=nl.sbuf,
+        )
+        W1_slab = nl.ndarray(
+            shape=(128, 128, 3, 3),
+            dtype=W.dtype,
+            buffer=nl.sbuf,
+        )
+        W0_slab[:, :, :, :] = nl.load(
+            W[
+                0:128,
+                0:128,
+                0:3,
+                0:3,
+            ]
+        )
+        W1_slab[:, :, :, :] = nl.load(
+            W[
+                128:256,
+                0:128,
+                0:3,
+                0:3,
+            ]
+        )
+
+        w0 = nl.ndarray(
+            shape=(128, 128, 3, 3),
+            dtype=W.dtype,
+            buffer=nl.sbuf,
+        )
+        w1 = nl.ndarray(
+            shape=(128, 128, 3, 3),
+            dtype=W.dtype,
+            buffer=nl.sbuf,
+        )
+        for i in nl.affine_range(3):
+            for j in nl.affine_range(3):
+                w0[:, :, i, j] = nisa.nc_transpose(W0_slab[:, :, i, j])
+                w1[:, :, i, j] = nisa.nc_transpose(W1_slab[:, :, i, j])
+
+        bias0 = nl.ndarray(
+            shape=(128,),
+            dtype=bias.dtype,
+            buffer=nl.sbuf,
+        )
+        bias1 = nl.ndarray(
+            shape=(128,),
+            dtype=bias.dtype,
+            buffer=nl.sbuf,
+        )
+        bias0[:] = nl.load(bias[0:128])
+        bias1[:] = nl.load(bias[128:256])
+
+        for img in nl.sequential_range(0, 4):
+            for rb in nl.sequential_range(0, 2):
+                row_start = rb * 16
+
+                X_band = nl.ndarray(
+                    shape=(128, 18, 34),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                X_band[:, :, :] = nl.load(
+                    X[
+                        img,
+                        0:128,
+                        row_start : row_start + 18,
+                        0:34,
+                    ]
+                )
+
+                psum0 = nl.zeros(
+                    shape=(128, 512),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+                psum1 = nl.zeros(
+                    shape=(128, 512),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+
+                for i in nl.affine_range(3):
+                    for j in nl.affine_range(3):
+                        X_packed = nl.ndarray(
+                            shape=(128, 512),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for r in nl.affine_range(16):
+                            X_packed[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
+                                X_band[:, r + i, j : j + 32],
+                            )
+                        psum0 += nisa.nc_matmul(w0[:, :, i, j], X_packed)
+                        psum1 += nisa.nc_matmul(w1[:, :, i, j], X_packed)
+
+                out0 = nl.ndarray(
+                    shape=(128, 16, 32),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for r in nl.affine_range(16):
+                    out0[:, r, :] = nl.add(
+                        psum0[:, r * 32 : (r + 1) * 32],
+                        bias0[:],
+                    )
+                nl.store(
+                    X_out[
+                        img,
+                        0:128,
+                        row_start : row_start + 16,
+                        0:32,
+                    ],
+                    out0,
+                )
+
+                out1 = nl.ndarray(
+                    shape=(128, 16, 32),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for r in nl.affine_range(16):
+                    out1[:, r, :] = nl.add(
+                        psum1[:, r * 32 : (r + 1) * 32],
+                        bias1[:],
+                    )
+                nl.store(
+                    X_out[
+                        img,
+                        128:256,
+                        row_start : row_start + 16,
+                        0:32,
+                    ],
+                    out1,
+                )
+
+        return X_out
+
     # Tiling dimensions
     c_in_tile = nl.tile_size.pmax                       # partition dim = 128
     c_out_tile = nl.tile_size.gemm_stationary_fmax      # tensor engine free dim = 128
