@@ -140,9 +140,13 @@ def conv2d_nki(X, W, bias):
                     dtype=X.dtype,
                     buffer=nl.sbuf,
                 )
-                src16_first = X_band_first[:, i : i + 16, j : j + 32]
-                src16_first_flat = src16_first.reshape((128, 512))
-                X_packed_first[:, :] = nisa.tensor_copy(src16_first_flat)
+                for group in nl.affine_range(4):
+                    for r_inner in nl.affine_range(4):
+                        r = group * 4 + r_inner
+                        f = group * 128 + r_inner * 32
+                        X_packed_first[:, f : f + 32] = nisa.tensor_copy(
+                            X_band_first[:, r + i, j : j + 32],
+                        )
                 psum0_first += nisa.nc_matmul(w0[:, :, i, j], X_packed_first)
                 psum1_first += nisa.nc_matmul(w1[:, :, i, j], X_packed_first)
 
@@ -221,9 +225,13 @@ def conv2d_nki(X, W, bias):
                         dtype=X.dtype,
                         buffer=nl.sbuf,
                     )
-                    src16 = X_band[:, i : i + 16, j : j + 32]
-                    src16_flat = src16.reshape((128, 512))
-                    X_packed[:, :] = nisa.tensor_copy(src16_flat)
+                    for group in nl.affine_range(4):
+                        for r_inner in nl.affine_range(4):
+                            r = group * 4 + r_inner
+                            f = group * 128 + r_inner * 32
+                            X_packed[:, f : f + 32] = nisa.tensor_copy(
+                                X_band[:, r + i, j : j + 32],
+                            )
                     psum0 += nisa.nc_matmul(w0[:, :, i, j], X_packed)
                     psum1 += nisa.nc_matmul(w1[:, :, i, j], X_packed)
 
@@ -296,6 +304,7 @@ def conv2d_nki(X, W, bias):
                     buffer=nl.psum,
                 )
 
+                # Per tap: 4x4 row tiling into X_packed, then both matmuls (same as img=0 blocks).
                 for i in nl.affine_range(3):
                     for j in nl.affine_range(3):
                         X_packed = nl.ndarray(
@@ -303,9 +312,13 @@ def conv2d_nki(X, W, bias):
                             dtype=X.dtype,
                             buffer=nl.sbuf,
                         )
-                        src16 = X_band[:, i : i + 16, j : j + 32]
-                        src16_flat = src16.reshape((128, 512))
-                        X_packed[:, :] = nisa.tensor_copy(src16_flat)
+                        for group in nl.affine_range(4):
+                            for r_inner in nl.affine_range(4):
+                                r = group * 4 + r_inner
+                                f = group * 128 + r_inner * 32
+                                X_packed[:, f : f + 32] = nisa.tensor_copy(
+                                    X_band[:, r + i, j : j + 32],
+                                )
                         psum0 += nisa.nc_matmul(w0[:, :, i, j], X_packed)
                         psum1 += nisa.nc_matmul(w1[:, :, i, j], X_packed)
 
