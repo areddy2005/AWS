@@ -140,10 +140,10 @@ def conv2d_nki(X, W, bias):
                     dtype=X.dtype,
                     buffer=nl.sbuf,
                 )
-                for group in nl.affine_range(4):
-                    for r_inner in nl.affine_range(4):
-                        r = group * 4 + r_inner
-                        f = group * 128 + r_inner * 32
+                for group in nl.affine_range(2):
+                    for r_inner in nl.affine_range(8):
+                        r = group * 8 + r_inner
+                        f = group * 256 + r_inner * 32
                         X_packed_first[:, f : f + 32] = nisa.tensor_copy(
                             X_band_first[:, r + i, j : j + 32],
                         )
@@ -225,10 +225,10 @@ def conv2d_nki(X, W, bias):
                         dtype=X.dtype,
                         buffer=nl.sbuf,
                     )
-                    for group in nl.affine_range(4):
-                        for r_inner in nl.affine_range(4):
-                            r = group * 4 + r_inner
-                            f = group * 128 + r_inner * 32
+                    for group in nl.affine_range(2):
+                        for r_inner in nl.affine_range(8):
+                            r = group * 8 + r_inner
+                            f = group * 256 + r_inner * 32
                             X_packed[:, f : f + 32] = nisa.tensor_copy(
                                 X_band[:, r + i, j : j + 32],
                             )
@@ -304,7 +304,7 @@ def conv2d_nki(X, W, bias):
                     buffer=nl.psum,
                 )
 
-                # Per tap: 4x4 row tiling into X_packed, then both matmuls (same as img=0 blocks).
+                # Per tap: 2x8 row tiling into X_packed, then both matmuls (same as img=0 blocks).
                 for i in nl.affine_range(3):
                     for j in nl.affine_range(3):
                         X_packed = nl.ndarray(
@@ -312,10 +312,10 @@ def conv2d_nki(X, W, bias):
                             dtype=X.dtype,
                             buffer=nl.sbuf,
                         )
-                        for group in nl.affine_range(4):
-                            for r_inner in nl.affine_range(4):
-                                r = group * 4 + r_inner
-                                f = group * 128 + r_inner * 32
+                        for group in nl.affine_range(2):
+                            for r_inner in nl.affine_range(8):
+                                r = group * 8 + r_inner
+                                f = group * 256 + r_inner * 32
                                 X_packed[:, f : f + 32] = nisa.tensor_copy(
                                     X_band[:, r + i, j : j + 32],
                                 )
