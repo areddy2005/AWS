@@ -100,18 +100,15 @@ def conv2d_nki(X, W, bias):
                 w0[:, :, i, j] = nisa.nc_transpose(W0_slab[:, :, i, j])
                 w1[:, :, i, j] = nisa.nc_transpose(W1_slab[:, :, i, j])
 
-        bias0 = nl.ndarray(
-            shape=(128,),
+        bias_sbuf = nl.ndarray(
+            shape=(128, 2),
             dtype=bias.dtype,
             buffer=nl.sbuf,
         )
-        bias1 = nl.ndarray(
-            shape=(128,),
-            dtype=bias.dtype,
-            buffer=nl.sbuf,
-        )
-        bias0[:] = nl.load(bias[0:128])
-        bias1[:] = nl.load(bias[128:256])
+        for c_out_idx in nl.affine_range(2):
+            bias_sbuf[:, c_out_idx] = nl.load(
+                bias[c_out_idx * 128 : (c_out_idx + 1) * 128]
+            )
 
         for img in nl.sequential_range(0, 4):
             for rb in nl.sequential_range(0, 2):
@@ -164,7 +161,7 @@ def conv2d_nki(X, W, bias):
                 for r in nl.affine_range(16):
                     out0[:, r, :] = nl.add(
                         psum0[:, r * 32 : (r + 1) * 32],
-                        bias0[:],
+                        bias_sbuf[:, 0],
                     )
                 nl.store(
                     X_out[
@@ -184,7 +181,7 @@ def conv2d_nki(X, W, bias):
                 for r in nl.affine_range(16):
                     out1[:, r, :] = nl.add(
                         psum1[:, r * 32 : (r + 1) * 32],
-                        bias1[:],
+                        bias_sbuf[:, 1],
                     )
                 nl.store(
                     X_out[
