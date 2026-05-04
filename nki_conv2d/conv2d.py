@@ -104,17 +104,16 @@ def conv2d_nki(X, W, bias):
         )
 
     # Main compute loop: sequential (img, row_block) to cap SBUF live set
-    for img in nl.sequential_range(batch_size):
-        for row_block in nl.sequential_range(n_row_blocks):
+    for img in nl.affine_range(batch_size):
+        for row_block in nl.affine_range(n_row_blocks):
             row_start = row_block * block_rows
 
-            X_bands = nl.ndarray(
+            for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                X_bands = nl.ndarray(
                 shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
                 dtype=X.dtype,
                 buffer=nl.sbuf,
-            )
-
-            for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                )
                 X_bands[:, c_in_tile_idx, :, :] = nl.load(
                     X[img,
                       c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
