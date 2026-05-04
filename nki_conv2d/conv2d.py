@@ -154,7 +154,7 @@ def conv2d_nki(X, W, bias):
         bias1 = nl.ndarray(shape=(c_out_tile, 1), dtype=bias.dtype, buffer=nl.sbuf)
         bias1[:, 0] = nl.load(bias[1 * c_out_tile : 2 * c_out_tile])
 
-        # Prologue (img0, row0): W1_slab + psum0_p / psum1_p; K==3: flat SBUF + bias then reshape for store.
+        # Prologue (img0, row0): W1_slab + psum0_p / psum1_p; K in {3,5}: flat SBUF + bias then reshape for store.
         img0 = 0
         row_start_p = 0
         X_bands_p = nl.ndarray(
@@ -290,7 +290,7 @@ def conv2d_nki(X, W, bias):
                               i, j]
                         )
 
-        if K == 3:
+        if K == 3 or K == 5:
             out_flat0_p = nl.ndarray(
                 shape=(c_out_tile, F_m),
                 dtype=X.dtype,
@@ -350,7 +350,7 @@ def conv2d_nki(X, W, bias):
                         X_packed,
                     )
 
-        if K == 3:
+        if K == 3 or K == 5:
             out_flat1_p = nl.ndarray(
                 shape=(c_out_tile, F_m),
                 dtype=X.dtype,
@@ -428,7 +428,7 @@ def conv2d_nki(X, W, bias):
                                 X_packed,
                             )
 
-                if K == 3:
+                if K == 3 or K == 5:
                     out_flat0_s0 = nl.ndarray(
                         shape=(c_out_tile, F_m),
                         dtype=X.dtype,
@@ -488,7 +488,7 @@ def conv2d_nki(X, W, bias):
                                 X_packed,
                             )
 
-                if K == 3:
+                if K == 3 or K == 5:
                     out_flat1_s0 = nl.ndarray(
                         shape=(c_out_tile, F_m),
                         dtype=X.dtype,
@@ -567,7 +567,7 @@ def conv2d_nki(X, W, bias):
                                     X_packed,
                                 )
 
-                    if K == 3:
+                    if K == 3 or K == 5:
                         out_flat0_s = nl.ndarray(
                             shape=(c_out_tile, F_m),
                             dtype=X.dtype,
@@ -627,7 +627,7 @@ def conv2d_nki(X, W, bias):
                                     X_packed,
                                 )
 
-                    if K == 3:
+                    if K == 3 or K == 5:
                         out_flat1_s = nl.ndarray(
                             shape=(c_out_tile, F_m),
                             dtype=X.dtype,
