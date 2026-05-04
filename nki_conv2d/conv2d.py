@@ -69,7 +69,7 @@ def conv2d_nki(X, W, bias):
     )
 
     if n_tiles_c_out == 2:
-        # out_channels == 256: w0/w1 in SBUF. K==5: slab nl.load + nc_transpose per tap (no transpose-DMA).
+        # out_channels == 256: K==3/K==5 use slab nl.load + nc_transpose per tap for w0 (preload here).
         w0 = nl.ndarray(
             shape=(c_in_tile, c_out_tile, n_tiles_c_in, K, K),
             dtype=W.dtype,
@@ -118,6 +118,27 @@ def conv2d_nki(X, W, bias):
                 w0[:, :, c_in_tile_idx, 4, 2] = nisa.nc_transpose(W0_slab[:, :, 4, 2])
                 w0[:, :, c_in_tile_idx, 4, 3] = nisa.nc_transpose(W0_slab[:, :, 4, 3])
                 w0[:, :, c_in_tile_idx, 4, 4] = nisa.nc_transpose(W0_slab[:, :, 4, 4])
+            elif K == 3:
+                W0_slab = nl.ndarray(
+                    shape=(c_out_tile, c_in_tile, K, K),
+                    dtype=W.dtype,
+                    buffer=nl.sbuf,
+                )
+                W0_slab[:, :, :, :] = nl.load(
+                    W[0 * c_out_tile : 1 * c_out_tile,
+                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                      0:K,
+                      0:K]
+                )
+                w0[:, :, c_in_tile_idx, 0, 0] = nisa.nc_transpose(W0_slab[:, :, 0, 0])
+                w0[:, :, c_in_tile_idx, 0, 1] = nisa.nc_transpose(W0_slab[:, :, 0, 1])
+                w0[:, :, c_in_tile_idx, 0, 2] = nisa.nc_transpose(W0_slab[:, :, 0, 2])
+                w0[:, :, c_in_tile_idx, 1, 0] = nisa.nc_transpose(W0_slab[:, :, 1, 0])
+                w0[:, :, c_in_tile_idx, 1, 1] = nisa.nc_transpose(W0_slab[:, :, 1, 1])
+                w0[:, :, c_in_tile_idx, 1, 2] = nisa.nc_transpose(W0_slab[:, :, 1, 2])
+                w0[:, :, c_in_tile_idx, 2, 0] = nisa.nc_transpose(W0_slab[:, :, 2, 0])
+                w0[:, :, c_in_tile_idx, 2, 1] = nisa.nc_transpose(W0_slab[:, :, 2, 1])
+                w0[:, :, c_in_tile_idx, 2, 2] = nisa.nc_transpose(W0_slab[:, :, 2, 2])
             else:
                 for i in nl.affine_range(K):
                     for j in nl.affine_range(K):
@@ -133,7 +154,7 @@ def conv2d_nki(X, W, bias):
         bias1 = nl.ndarray(shape=(c_out_tile, 1), dtype=bias.dtype, buffer=nl.sbuf)
         bias1[:, 0] = nl.load(bias[1 * c_out_tile : 2 * c_out_tile])
 
-        # Prologue: K==3 all w1 then w0; K==5: W0_slab then W1_slab (each discarded after filling w0/w1).
+        # Prologue: K==3/K==5 use W1_slab then same psum0 nest; else interleaved w1 loads.
         img0 = 0
         row_start_p = 0
         X_bands = nl.ndarray(
@@ -156,181 +177,42 @@ def conv2d_nki(X, W, bias):
         )
         for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
             if K == 3:
-                # All w1 taps for this c_in tile (then pure w0 / TE work).
-                w1[:, :, c_in_tile_idx, 0, 0] = nl.load_transpose2d(
-                    W[1 * c_out_tile : 2 * c_out_tile,
-                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                      0, 0]
-                )
-                w1[:, :, c_in_tile_idx, 0, 1] = nl.load_transpose2d(
-                    W[1 * c_out_tile : 2 * c_out_tile,
-                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                      0, 1]
-                )
-                w1[:, :, c_in_tile_idx, 0, 2] = nl.load_transpose2d(
-                    W[1 * c_out_tile : 2 * c_out_tile,
-                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                      0, 2]
-                )
-                w1[:, :, c_in_tile_idx, 1, 0] = nl.load_transpose2d(
-                    W[1 * c_out_tile : 2 * c_out_tile,
-                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                      1, 0]
-                )
-                w1[:, :, c_in_tile_idx, 1, 1] = nl.load_transpose2d(
-                    W[1 * c_out_tile : 2 * c_out_tile,
-                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                      1, 1]
-                )
-                w1[:, :, c_in_tile_idx, 1, 2] = nl.load_transpose2d(
-                    W[1 * c_out_tile : 2 * c_out_tile,
-                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                      1, 2]
-                )
-                w1[:, :, c_in_tile_idx, 2, 0] = nl.load_transpose2d(
-                    W[1 * c_out_tile : 2 * c_out_tile,
-                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                      2, 0]
-                )
-                w1[:, :, c_in_tile_idx, 2, 1] = nl.load_transpose2d(
-                    W[1 * c_out_tile : 2 * c_out_tile,
-                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                      2, 1]
-                )
-                w1[:, :, c_in_tile_idx, 2, 2] = nl.load_transpose2d(
-                    W[1 * c_out_tile : 2 * c_out_tile,
-                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
-                      2, 2]
-                )
-                # w0 row 0
-                X_packed = nl.ndarray(
-                    shape=(c_in_tile, F_m),
-                    dtype=X.dtype,
+                W1_slab = nl.ndarray(
+                    shape=(c_out_tile, c_in_tile, K, K),
+                    dtype=W.dtype,
                     buffer=nl.sbuf,
                 )
-                for r in nl.affine_range(block_rows):
-                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                        X_bands[:, c_in_tile_idx, r + 0, 0 : out_width],
-                        engine=nisa.engine.vector,
-                    )
-                psum0 += nisa.nc_matmul(
-                    w0[:, :, c_in_tile_idx, 0, 0],
-                    X_packed,
+                W1_slab[:, :, :, :] = nl.load(
+                    W[1 * c_out_tile : 2 * c_out_tile,
+                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                      0:K,
+                      0:K]
                 )
-                X_packed = nl.ndarray(
-                    shape=(c_in_tile, F_m),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                        X_bands[:, c_in_tile_idx, r + 0, 1 : 1 + out_width],
-                        engine=nisa.engine.vector,
-                    )
-                psum0 += nisa.nc_matmul(
-                    w0[:, :, c_in_tile_idx, 0, 1],
-                    X_packed,
-                )
-                X_packed = nl.ndarray(
-                    shape=(c_in_tile, F_m),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                        X_bands[:, c_in_tile_idx, r + 0, 2 : 2 + out_width],
-                        engine=nisa.engine.vector,
-                    )
-                psum0 += nisa.nc_matmul(
-                    w0[:, :, c_in_tile_idx, 0, 2],
-                    X_packed,
-                )
-                # w0 row 1
-                X_packed = nl.ndarray(
-                    shape=(c_in_tile, F_m),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                        X_bands[:, c_in_tile_idx, r + 1, 0 : out_width],
-                        engine=nisa.engine.vector,
-                    )
-                psum0 += nisa.nc_matmul(
-                    w0[:, :, c_in_tile_idx, 1, 0],
-                    X_packed,
-                )
-                X_packed = nl.ndarray(
-                    shape=(c_in_tile, F_m),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                        X_bands[:, c_in_tile_idx, r + 1, 1 : 1 + out_width],
-                        engine=nisa.engine.vector,
-                    )
-                psum0 += nisa.nc_matmul(
-                    w0[:, :, c_in_tile_idx, 1, 1],
-                    X_packed,
-                )
-                X_packed = nl.ndarray(
-                    shape=(c_in_tile, F_m),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                        X_bands[:, c_in_tile_idx, r + 1, 2 : 2 + out_width],
-                        engine=nisa.engine.vector,
-                    )
-                psum0 += nisa.nc_matmul(
-                    w0[:, :, c_in_tile_idx, 1, 2],
-                    X_packed,
-                )
-                # w0 row 2
-                X_packed = nl.ndarray(
-                    shape=(c_in_tile, F_m),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                        X_bands[:, c_in_tile_idx, r + 2, 0 : out_width],
-                        engine=nisa.engine.vector,
-                    )
-                psum0 += nisa.nc_matmul(
-                    w0[:, :, c_in_tile_idx, 2, 0],
-                    X_packed,
-                )
-                X_packed = nl.ndarray(
-                    shape=(c_in_tile, F_m),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                        X_bands[:, c_in_tile_idx, r + 2, 1 : 1 + out_width],
-                        engine=nisa.engine.vector,
-                    )
-                psum0 += nisa.nc_matmul(
-                    w0[:, :, c_in_tile_idx, 2, 1],
-                    X_packed,
-                )
-                X_packed = nl.ndarray(
-                    shape=(c_in_tile, F_m),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
-                        X_bands[:, c_in_tile_idx, r + 2, 2 : 2 + out_width],
-                        engine=nisa.engine.vector,
-                    )
-                psum0 += nisa.nc_matmul(
-                    w0[:, :, c_in_tile_idx, 2, 2],
-                    X_packed,
-                )
+                w1[:, :, c_in_tile_idx, 0, 0] = nisa.nc_transpose(W1_slab[:, :, 0, 0])
+                w1[:, :, c_in_tile_idx, 0, 1] = nisa.nc_transpose(W1_slab[:, :, 0, 1])
+                w1[:, :, c_in_tile_idx, 0, 2] = nisa.nc_transpose(W1_slab[:, :, 0, 2])
+                w1[:, :, c_in_tile_idx, 1, 0] = nisa.nc_transpose(W1_slab[:, :, 1, 0])
+                w1[:, :, c_in_tile_idx, 1, 1] = nisa.nc_transpose(W1_slab[:, :, 1, 1])
+                w1[:, :, c_in_tile_idx, 1, 2] = nisa.nc_transpose(W1_slab[:, :, 1, 2])
+                w1[:, :, c_in_tile_idx, 2, 0] = nisa.nc_transpose(W1_slab[:, :, 2, 0])
+                w1[:, :, c_in_tile_idx, 2, 1] = nisa.nc_transpose(W1_slab[:, :, 2, 1])
+                w1[:, :, c_in_tile_idx, 2, 2] = nisa.nc_transpose(W1_slab[:, :, 2, 2])
+                for i in nl.affine_range(K):
+                    for j in nl.affine_range(K):
+                        X_packed = nl.ndarray(
+                            shape=(c_in_tile, F_m),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for r in nl.affine_range(block_rows):
+                            X_packed[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                engine=nisa.engine.vector,
+                            )
+                        psum0 += nisa.nc_matmul(
+                            w0[:, :, c_in_tile_idx, i, j],
+                            X_packed,
+                        )
             elif K == 5:
                 # W1: one contiguous nl.load [out,in,K,K] then TensorE transpose per tap (no transpose-DMA).
                 W1_slab = nl.ndarray(
