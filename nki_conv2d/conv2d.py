@@ -154,7 +154,7 @@ def conv2d_nki(X, W, bias):
         bias1 = nl.ndarray(shape=(c_out_tile, 1), dtype=bias.dtype, buffer=nl.sbuf)
         bias1[:, 0] = nl.load(bias[1 * c_out_tile : 2 * c_out_tile])
 
-        # Prologue (img0, row0): W1_slab + psum0_p / psum1_p; else interleaved w1 loads.
+        # Prologue (img0, row0): W1_slab + psum0_p / psum1_p; K==3: flat SBUF + bias then reshape for store.
         img0 = 0
         row_start_p = 0
         X_bands_p = nl.ndarray(
@@ -290,23 +290,42 @@ def conv2d_nki(X, W, bias):
                               i, j]
                         )
 
-        out_buf0_p = nl.ndarray(
-            shape=(c_out_tile, block_rows, out_width),
-            dtype=X.dtype,
-            buffer=nl.sbuf,
-        )
-        for r in nl.affine_range(block_rows):
-            out_buf0_p[:, r, :] = nl.add(
-                psum0_p[:, r * out_width : (r + 1) * out_width],
+        if K == 3:
+            out_flat0_p = nl.ndarray(
+                shape=(c_out_tile, F_m),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
+            out_flat0_p[:, :] = nl.add(
+                psum0_p[:, :],
                 bias0,
             )
-        nl.store(
-            X_out[img0,
-                  0 * c_out_tile : 1 * c_out_tile,
-                  row_start_p : row_start_p + block_rows,
-                  :],
-            out_buf0_p,
-        )
+            out_buf0_p = out_flat0_p.reshape((c_out_tile, block_rows, out_width))
+            nl.store(
+                X_out[img0,
+                      0 * c_out_tile : 1 * c_out_tile,
+                      row_start_p : row_start_p + block_rows,
+                      :],
+                out_buf0_p,
+            )
+        else:
+            out_buf0_p = nl.ndarray(
+                shape=(c_out_tile, block_rows, out_width),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
+            for r in nl.affine_range(block_rows):
+                out_buf0_p[:, r, :] = nl.add(
+                    psum0_p[:, r * out_width : (r + 1) * out_width],
+                    bias0,
+                )
+            nl.store(
+                X_out[img0,
+                      0 * c_out_tile : 1 * c_out_tile,
+                      row_start_p : row_start_p + block_rows,
+                      :],
+                out_buf0_p,
+            )
 
         psum1_p = nl.zeros(
             shape=(c_out_tile, F_m),
@@ -331,23 +350,42 @@ def conv2d_nki(X, W, bias):
                         X_packed,
                     )
 
-        out_buf1_p = nl.ndarray(
-            shape=(c_out_tile, block_rows, out_width),
-            dtype=X.dtype,
-            buffer=nl.sbuf,
-        )
-        for r in nl.affine_range(block_rows):
-            out_buf1_p[:, r, :] = nl.add(
-                psum1_p[:, r * out_width : (r + 1) * out_width],
+        if K == 3:
+            out_flat1_p = nl.ndarray(
+                shape=(c_out_tile, F_m),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
+            out_flat1_p[:, :] = nl.add(
+                psum1_p[:, :],
                 bias1,
             )
-        nl.store(
-            X_out[img0,
-                  1 * c_out_tile : 2 * c_out_tile,
-                  row_start_p : row_start_p + block_rows,
-                  :],
-            out_buf1_p,
-        )
+            out_buf1_p = out_flat1_p.reshape((c_out_tile, block_rows, out_width))
+            nl.store(
+                X_out[img0,
+                      1 * c_out_tile : 2 * c_out_tile,
+                      row_start_p : row_start_p + block_rows,
+                      :],
+                out_buf1_p,
+            )
+        else:
+            out_buf1_p = nl.ndarray(
+                shape=(c_out_tile, block_rows, out_width),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
+            for r in nl.affine_range(block_rows):
+                out_buf1_p[:, r, :] = nl.add(
+                    psum1_p[:, r * out_width : (r + 1) * out_width],
+                    bias1,
+                )
+            nl.store(
+                X_out[img0,
+                      1 * c_out_tile : 2 * c_out_tile,
+                      row_start_p : row_start_p + block_rows,
+                      :],
+                out_buf1_p,
+            )
 
         # Steady: img=0, row_block 1 .. n_row_blocks-1 (w0/w1 resident; no w1 reload in c_out0 nest)
         if n_row_blocks > 1:
@@ -390,23 +428,42 @@ def conv2d_nki(X, W, bias):
                                 X_packed,
                             )
 
-                out_buf0_s0 = nl.ndarray(
-                    shape=(c_out_tile, block_rows, out_width),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    out_buf0_s0[:, r, :] = nl.add(
-                        psum0_s0[:, r * out_width : (r + 1) * out_width],
+                if K == 3:
+                    out_flat0_s0 = nl.ndarray(
+                        shape=(c_out_tile, F_m),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    out_flat0_s0[:, :] = nl.add(
+                        psum0_s0[:, :],
                         bias0,
                     )
-                nl.store(
-                    X_out[img_s,
-                          0 * c_out_tile : 1 * c_out_tile,
-                          row_start_s : row_start_s + block_rows,
-                          :],
-                    out_buf0_s0,
-                )
+                    out_buf0_s0 = out_flat0_s0.reshape((c_out_tile, block_rows, out_width))
+                    nl.store(
+                        X_out[img_s,
+                              0 * c_out_tile : 1 * c_out_tile,
+                              row_start_s : row_start_s + block_rows,
+                              :],
+                        out_buf0_s0,
+                    )
+                else:
+                    out_buf0_s0 = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        out_buf0_s0[:, r, :] = nl.add(
+                            psum0_s0[:, r * out_width : (r + 1) * out_width],
+                            bias0,
+                        )
+                    nl.store(
+                        X_out[img_s,
+                              0 * c_out_tile : 1 * c_out_tile,
+                              row_start_s : row_start_s + block_rows,
+                              :],
+                        out_buf0_s0,
+                    )
 
                 psum1_s0 = nl.zeros(
                     shape=(c_out_tile, F_m),
@@ -431,23 +488,42 @@ def conv2d_nki(X, W, bias):
                                 X_packed,
                             )
 
-                out_buf1_s0 = nl.ndarray(
-                    shape=(c_out_tile, block_rows, out_width),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    out_buf1_s0[:, r, :] = nl.add(
-                        psum1_s0[:, r * out_width : (r + 1) * out_width],
+                if K == 3:
+                    out_flat1_s0 = nl.ndarray(
+                        shape=(c_out_tile, F_m),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    out_flat1_s0[:, :] = nl.add(
+                        psum1_s0[:, :],
                         bias1,
                     )
-                nl.store(
-                    X_out[img_s,
-                          1 * c_out_tile : 2 * c_out_tile,
-                          row_start_s : row_start_s + block_rows,
-                          :],
-                    out_buf1_s0,
-                )
+                    out_buf1_s0 = out_flat1_s0.reshape((c_out_tile, block_rows, out_width))
+                    nl.store(
+                        X_out[img_s,
+                              1 * c_out_tile : 2 * c_out_tile,
+                              row_start_s : row_start_s + block_rows,
+                              :],
+                        out_buf1_s0,
+                    )
+                else:
+                    out_buf1_s0 = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        out_buf1_s0[:, r, :] = nl.add(
+                            psum1_s0[:, r * out_width : (r + 1) * out_width],
+                            bias1,
+                        )
+                    nl.store(
+                        X_out[img_s,
+                              1 * c_out_tile : 2 * c_out_tile,
+                              row_start_s : row_start_s + block_rows,
+                              :],
+                        out_buf1_s0,
+                    )
 
         # Steady: img 1 .. batch_size-1, all row blocks
         if batch_size > 1:
@@ -491,23 +567,42 @@ def conv2d_nki(X, W, bias):
                                     X_packed,
                                 )
 
-                    out_buf0_s = nl.ndarray(
-                        shape=(c_out_tile, block_rows, out_width),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
-                    )
-                    for r in nl.affine_range(block_rows):
-                        out_buf0_s[:, r, :] = nl.add(
-                            psum0_s[:, r * out_width : (r + 1) * out_width],
+                    if K == 3:
+                        out_flat0_s = nl.ndarray(
+                            shape=(c_out_tile, F_m),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        out_flat0_s[:, :] = nl.add(
+                            psum0_s[:, :],
                             bias0,
                         )
-                    nl.store(
-                        X_out[img_s,
-                              0 * c_out_tile : 1 * c_out_tile,
-                              row_start_s : row_start_s + block_rows,
-                              :],
-                        out_buf0_s,
-                    )
+                        out_buf0_s = out_flat0_s.reshape((c_out_tile, block_rows, out_width))
+                        nl.store(
+                            X_out[img_s,
+                                  0 * c_out_tile : 1 * c_out_tile,
+                                  row_start_s : row_start_s + block_rows,
+                                  :],
+                            out_buf0_s,
+                        )
+                    else:
+                        out_buf0_s = nl.ndarray(
+                            shape=(c_out_tile, block_rows, out_width),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for r in nl.affine_range(block_rows):
+                            out_buf0_s[:, r, :] = nl.add(
+                                psum0_s[:, r * out_width : (r + 1) * out_width],
+                                bias0,
+                            )
+                        nl.store(
+                            X_out[img_s,
+                                  0 * c_out_tile : 1 * c_out_tile,
+                                  row_start_s : row_start_s + block_rows,
+                                  :],
+                            out_buf0_s,
+                        )
 
                     psum1_s = nl.zeros(
                         shape=(c_out_tile, F_m),
@@ -532,23 +627,42 @@ def conv2d_nki(X, W, bias):
                                     X_packed,
                                 )
 
-                    out_buf1_s = nl.ndarray(
-                        shape=(c_out_tile, block_rows, out_width),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
-                    )
-                    for r in nl.affine_range(block_rows):
-                        out_buf1_s[:, r, :] = nl.add(
-                            psum1_s[:, r * out_width : (r + 1) * out_width],
+                    if K == 3:
+                        out_flat1_s = nl.ndarray(
+                            shape=(c_out_tile, F_m),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        out_flat1_s[:, :] = nl.add(
+                            psum1_s[:, :],
                             bias1,
                         )
-                    nl.store(
-                        X_out[img_s,
-                              1 * c_out_tile : 2 * c_out_tile,
-                              row_start_s : row_start_s + block_rows,
-                              :],
-                        out_buf1_s,
-                    )
+                        out_buf1_s = out_flat1_s.reshape((c_out_tile, block_rows, out_width))
+                        nl.store(
+                            X_out[img_s,
+                                  1 * c_out_tile : 2 * c_out_tile,
+                                  row_start_s : row_start_s + block_rows,
+                                  :],
+                            out_buf1_s,
+                        )
+                    else:
+                        out_buf1_s = nl.ndarray(
+                            shape=(c_out_tile, block_rows, out_width),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for r in nl.affine_range(block_rows):
+                            out_buf1_s[:, r, :] = nl.add(
+                                psum1_s[:, r * out_width : (r + 1) * out_width],
+                                bias1,
+                            )
+                        nl.store(
+                            X_out[img_s,
+                                  1 * c_out_tile : 2 * c_out_tile,
+                                  row_start_s : row_start_s + block_rows,
+                                  :],
+                            out_buf1_s,
+                        )
 
     else:
         # Stage weights into SBUF. K in {3,5}: one contiguous nl.load per (c_out,c_in) slab + nc_transpose per tap.
