@@ -110,8 +110,8 @@ def conv2d_nki(X, W, bias):
                 bias[c_out_idx * 128 : (c_out_idx + 1) * 128]
             )
 
-        for img in nl.sequential_range(0, 4):
-            for rb in nl.sequential_range(0, 2):
+        for img in nl.affine_range(0, 4):
+            for rb in nl.affine_range(0, 2):
                 row_start = rb * 16
 
                 X_band = nl.ndarray(
