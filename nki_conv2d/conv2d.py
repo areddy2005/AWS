@@ -833,201 +833,106 @@ def conv2d_nki(X, W, bias):
         bias_sbuf[:, 1] = nl.load(bias[128:256])
 
         for img in nl.sequential_range(4):
-            X_half = nl.ndarray(
-                shape=(128, 34, 66),
+            X_pair = nl.ndarray(
+                shape=(128, 18, 66),
                 dtype=X.dtype,
                 buffer=nl.sbuf,
             )
 
-            # Top half: input rows 0:34 → output row blocks 0–3
-            X_half[:, :, :] = nl.load(
-                X[
-                    img,
-                    0:128,
-                    0:34,
-                    0:66,
-                ]
-            )
-
-            for rb in nl.sequential_range(4):
-                local_row = rb * 8
-                row_start = rb * 8
-
-                psum0 = nl.zeros(
-                    shape=(128, 512),
-                    dtype=nl.float32,
-                    buffer=nl.psum,
-                )
-                psum1 = nl.zeros(
-                    shape=(128, 512),
-                    dtype=nl.float32,
-                    buffer=nl.psum,
-                )
-
-                for wi in nl.affine_range(3):
-                    X_pack0 = nl.ndarray(
-                        shape=(128, 512),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
-                    )
-                    X_pack1 = nl.ndarray(
-                        shape=(128, 512),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
-                    )
-
-                    X_pack0[:, :] = nisa.tensor_copy(
-                        X_half[
-                            :,
-                            local_row + wi : local_row + wi + 8,
-                            0:64,
-                        ]
-                    ).reshape((128, 512))
-
-                    psum0 += nisa.nc_matmul(w0[:, :, wi, 0], X_pack0)
-                    psum1 += nisa.nc_matmul(w1[:, :, wi, 0], X_pack0)
-
-                    X_pack1[:, :] = nisa.tensor_copy(
-                        X_half[
-                            :,
-                            local_row + wi : local_row + wi + 8,
-                            1:65,
-                        ]
-                    ).reshape((128, 512))
-
-                    psum0 += nisa.nc_matmul(w0[:, :, wi, 1], X_pack1)
-                    psum1 += nisa.nc_matmul(w1[:, :, wi, 1], X_pack1)
-
-                    X_pack0[:, :] = nisa.tensor_copy(
-                        X_half[
-                            :,
-                            local_row + wi : local_row + wi + 8,
-                            2:66,
-                        ]
-                    ).reshape((128, 512))
-
-                    psum0 += nisa.nc_matmul(w0[:, :, wi, 2], X_pack0)
-                    psum1 += nisa.nc_matmul(w1[:, :, wi, 2], X_pack0)
-
-                nl.store(
-                    X_out[
+            # Four pair bands: rows [0:18], [16:34], [32:50], [48:66]; two 8-row
+            # output tiles per load (local_row 0 and 8).
+            for pair_idx in nl.sequential_range(4):
+                r0 = pair_idx * 16
+                X_pair[:, :, :] = nl.load(
+                    X[
                         img,
                         0:128,
-                        row_start : row_start + 8,
-                        0:64,
-                    ],
-                    nl.add(
-                        psum0,
-                        bias_sbuf[:, 0],
-                    ).reshape((128, 8, 64)),
-                )
-                nl.store(
-                    X_out[
-                        img,
-                        128:256,
-                        row_start : row_start + 8,
-                        0:64,
-                    ],
-                    nl.add(
-                        psum1,
-                        bias_sbuf[:, 1],
-                    ).reshape((128, 8, 64)),
+                        r0 : r0 + 18,
+                        0:66,
+                    ]
                 )
 
-            # Bottom half: input rows 32:66 → output row blocks 4–7
-            X_half[:, :, :] = nl.load(
-                X[
-                    img,
-                    0:128,
-                    32:66,
-                    0:66,
-                ]
-            )
+                for tile_idx in nl.sequential_range(2):
+                    row_start = pair_idx * 16 + tile_idx * 8
+                    local_row = tile_idx * 8
 
-            for rb in nl.sequential_range(4):
-                row_start = (rb + 4) * 8
-                local_row = rb * 8
-
-                psum0 = nl.zeros(
-                    shape=(128, 512),
-                    dtype=nl.float32,
-                    buffer=nl.psum,
-                )
-                psum1 = nl.zeros(
-                    shape=(128, 512),
-                    dtype=nl.float32,
-                    buffer=nl.psum,
-                )
-
-                for wi in nl.affine_range(3):
-                    X_pack0 = nl.ndarray(
+                    psum0 = nl.zeros(
                         shape=(128, 512),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
+                        dtype=nl.float32,
+                        buffer=nl.psum,
                     )
-                    X_pack1 = nl.ndarray(
+                    psum1 = nl.zeros(
                         shape=(128, 512),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
+                        dtype=nl.float32,
+                        buffer=nl.psum,
                     )
 
-                    X_pack0[:, :] = nisa.tensor_copy(
-                        X_half[
-                            :,
-                            local_row + wi : local_row + wi + 8,
+                    for wi in nl.affine_range(3):
+                        X_pack0 = nl.ndarray(
+                            shape=(128, 512),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        X_pack1 = nl.ndarray(
+                            shape=(128, 512),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+
+                        X_pack0[:, :] = nisa.tensor_copy(
+                            X_pair[
+                                :,
+                                local_row + wi : local_row + wi + 8,
+                                0:64,
+                            ]
+                        ).reshape((128, 512))
+                        psum0 += nisa.nc_matmul(w0[:, :, wi, 0], X_pack0)
+                        psum1 += nisa.nc_matmul(w1[:, :, wi, 0], X_pack0)
+
+                        X_pack1[:, :] = nisa.tensor_copy(
+                            X_pair[
+                                :,
+                                local_row + wi : local_row + wi + 8,
+                                1:65,
+                            ]
+                        ).reshape((128, 512))
+                        psum0 += nisa.nc_matmul(w0[:, :, wi, 1], X_pack1)
+                        psum1 += nisa.nc_matmul(w1[:, :, wi, 1], X_pack1)
+
+                        X_pack0[:, :] = nisa.tensor_copy(
+                            X_pair[
+                                :,
+                                local_row + wi : local_row + wi + 8,
+                                2:66,
+                            ]
+                        ).reshape((128, 512))
+                        psum0 += nisa.nc_matmul(w0[:, :, wi, 2], X_pack0)
+                        psum1 += nisa.nc_matmul(w1[:, :, wi, 2], X_pack0)
+
+                    nl.store(
+                        X_out[
+                            img,
+                            0:128,
+                            row_start : row_start + 8,
                             0:64,
-                        ]
-                    ).reshape((128, 512))
-
-                    psum0 += nisa.nc_matmul(w0[:, :, wi, 0], X_pack0)
-                    psum1 += nisa.nc_matmul(w1[:, :, wi, 0], X_pack0)
-
-                    X_pack1[:, :] = nisa.tensor_copy(
-                        X_half[
-                            :,
-                            local_row + wi : local_row + wi + 8,
-                            1:65,
-                        ]
-                    ).reshape((128, 512))
-
-                    psum0 += nisa.nc_matmul(w0[:, :, wi, 1], X_pack1)
-                    psum1 += nisa.nc_matmul(w1[:, :, wi, 1], X_pack1)
-
-                    X_pack0[:, :] = nisa.tensor_copy(
-                        X_half[
-                            :,
-                            local_row + wi : local_row + wi + 8,
-                            2:66,
-                        ]
-                    ).reshape((128, 512))
-
-                    psum0 += nisa.nc_matmul(w0[:, :, wi, 2], X_pack0)
-                    psum1 += nisa.nc_matmul(w1[:, :, wi, 2], X_pack0)
-
-                nl.store(
-                    X_out[
-                        img,
-                        0:128,
-                        row_start : row_start + 8,
-                        0:64,
-                    ],
-                    nl.add(
-                        psum0,
-                        bias_sbuf[:, 0],
-                    ).reshape((128, 8, 64)),
-                )
-                nl.store(
-                    X_out[
-                        img,
-                        128:256,
-                        row_start : row_start + 8,
-                        0:64,
-                    ],
-                    nl.add(
-                        psum1,
-                        bias_sbuf[:, 1],
-                    ).reshape((128, 8, 64)),
-                )
+                        ],
+                        nl.add(
+                            psum0,
+                            bias_sbuf[:, 0],
+                        ).reshape((128, 8, 64)),
+                    )
+                    nl.store(
+                        X_out[
+                            img,
+                            128:256,
+                            row_start : row_start + 8,
+                            0:64,
+                        ],
+                        nl.add(
+                            psum1,
+                            bias_sbuf[:, 1],
+                        ).reshape((128, 8, 64)),
+                    )
 
         return X_out
 
