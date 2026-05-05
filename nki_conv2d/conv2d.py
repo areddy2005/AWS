@@ -161,7 +161,8 @@ def conv2d_nki(X, W, bias):
         )
         for r in nl.affine_range(16):
             for c in nl.affine_range(32):
-                idx_first[:, r * 32 + c] = r * 34 + c
+                for p in nl.affine_range(128):
+                    idx_first[p, r * 32 + c] = r * 34 + c
 
         X_pack0 = nl.gather_flattened(
             data=X_band_first,
