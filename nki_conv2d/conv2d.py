@@ -520,74 +520,38 @@ def conv2d_nki(X, W, bias):
         bias_sbuf[:, 0] = nl.load(bias[0:128])
         bias_sbuf[:, 1] = nl.load(bias[128:256])
 
-        psum0_first = nl.zeros(
+        psum0 = nl.zeros(
             shape=(128, 512),
             dtype=nl.float32,
             buffer=nl.psum,
         )
-        psum1_first = nl.zeros(
+        psum1 = nl.zeros(
             shape=(128, 512),
             dtype=nl.float32,
             buffer=nl.psum,
         )
-
-        X_pack0 = nl.ndarray(
-            shape=(128, 512),
-            dtype=X.dtype,
-            buffer=nl.sbuf,
-        )
-        X_pack1 = nl.ndarray(
-            shape=(128, 512),
-            dtype=X.dtype,
-            buffer=nl.sbuf,
-        )
-
-        # Ping-pong: depth-2 schedule; packs via tensor_copy(window).reshape(128,512).
-        X_pack0[:, :] = nisa.tensor_copy(X_band_first[:, 0:16, 0:32]).reshape((128, 512))
-        X_pack1[:, :] = nisa.tensor_copy(X_band_first[:, 0:16, 1:33]).reshape((128, 512))
-        psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack0)
-        psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack0)
-
-        X_pack0[:, :] = nisa.tensor_copy(X_band_first[:, 0:16, 2:34]).reshape((128, 512))
-        psum0_first += nisa.nc_matmul(w0[:, :, 0, 1], X_pack1)
-        psum1_first += nisa.nc_matmul(w1[:, :, 0, 1], X_pack1)
-
-        X_pack1[:, :] = nisa.tensor_copy(X_band_first[:, 1:17, 0:32]).reshape((128, 512))
-        psum0_first += nisa.nc_matmul(w0[:, :, 0, 2], X_pack0)
-        psum1_first += nisa.nc_matmul(w1[:, :, 0, 2], X_pack0)
-
-        X_pack0[:, :] = nisa.tensor_copy(X_band_first[:, 1:17, 1:33]).reshape((128, 512))
-        psum0_first += nisa.nc_matmul(w0[:, :, 1, 0], X_pack1)
-        psum1_first += nisa.nc_matmul(w1[:, :, 1, 0], X_pack1)
-
-        X_pack1[:, :] = nisa.tensor_copy(X_band_first[:, 1:17, 2:34]).reshape((128, 512))
-        psum0_first += nisa.nc_matmul(w0[:, :, 1, 1], X_pack0)
-        psum1_first += nisa.nc_matmul(w1[:, :, 1, 1], X_pack0)
-
-        X_pack0[:, :] = nisa.tensor_copy(X_band_first[:, 2:18, 0:32]).reshape((128, 512))
-        psum0_first += nisa.nc_matmul(w0[:, :, 1, 2], X_pack1)
-        psum1_first += nisa.nc_matmul(w1[:, :, 1, 2], X_pack1)
-
-        X_pack1[:, :] = nisa.tensor_copy(X_band_first[:, 2:18, 1:33]).reshape((128, 512))
-        psum0_first += nisa.nc_matmul(w0[:, :, 2, 0], X_pack0)
-        psum1_first += nisa.nc_matmul(w1[:, :, 2, 0], X_pack0)
-
-        X_pack0[:, :] = nisa.tensor_copy(X_band_first[:, 2:18, 2:34]).reshape((128, 512))
-        psum0_first += nisa.nc_matmul(w0[:, :, 2, 1], X_pack1)
-        psum1_first += nisa.nc_matmul(w1[:, :, 2, 1], X_pack1)
-
-        psum0_first += nisa.nc_matmul(w0[:, :, 2, 2], X_pack0)
-        psum1_first += nisa.nc_matmul(w1[:, :, 2, 2], X_pack0)
-
-        out_flat0 = nl.ndarray(
-            shape=(128, 512),
-            dtype=X.dtype,
-            buffer=nl.sbuf,
-        )
-        out_flat0[:, :] = nl.add(
-            psum0_first[:, :],
-            bias_sbuf[:, 0],
-        )
+        for i in nl.affine_range(3):
+            for j in nl.affine_range(3):
+                X_packed = nl.ndarray(
+                    shape=(128, 512),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                X_packed[:, :] = nisa.tensor_copy(
+                    X_band_first[
+                        :,
+                        i : i + 16,
+                        j : j + 32,
+                    ]
+                ).reshape((128, 512))
+                psum0 += nisa.nc_matmul(
+                    w0[:, :, i, j],
+                    X_packed,
+                )
+                psum1 += nisa.nc_matmul(
+                    w1[:, :, i, j],
+                    X_packed,
+                )
         nl.store(
             X_out[
                 0,
@@ -595,17 +559,10 @@ def conv2d_nki(X, W, bias):
                 0:16,
                 0:32,
             ],
-            out_flat0.reshape((128, 16, 32)),
-        )
-
-        out_flat1 = nl.ndarray(
-            shape=(128, 512),
-            dtype=X.dtype,
-            buffer=nl.sbuf,
-        )
-        out_flat1[:, :] = nl.add(
-            psum1_first[:, :],
-            bias_sbuf[:, 1],
+            nl.add(
+                psum0,
+                bias_sbuf[:, 0],
+            ).reshape((128, 16, 32)),
         )
         nl.store(
             X_out[
@@ -614,7 +571,10 @@ def conv2d_nki(X, W, bias):
                 0:16,
                 0:32,
             ],
-            out_flat1.reshape((128, 16, 32)),
+            nl.add(
+                psum1,
+                bias_sbuf[:, 1],
+            ).reshape((128, 16, 32)),
         )
 
         for rb in nl.sequential_range(1, 2):
@@ -644,52 +604,28 @@ def conv2d_nki(X, W, bias):
                 dtype=nl.float32,
                 buffer=nl.psum,
             )
-
-            X_pack0[:, :] = nisa.tensor_copy(X_band[:, 0:16, 0:32]).reshape((128, 512))
-            X_pack1[:, :] = nisa.tensor_copy(X_band[:, 0:16, 1:33]).reshape((128, 512))
-            psum0 += nisa.nc_matmul(w0[:, :, 0, 0], X_pack0)
-            psum1 += nisa.nc_matmul(w1[:, :, 0, 0], X_pack0)
-
-            X_pack0[:, :] = nisa.tensor_copy(X_band[:, 0:16, 2:34]).reshape((128, 512))
-            psum0 += nisa.nc_matmul(w0[:, :, 0, 1], X_pack1)
-            psum1 += nisa.nc_matmul(w1[:, :, 0, 1], X_pack1)
-
-            X_pack1[:, :] = nisa.tensor_copy(X_band[:, 1:17, 0:32]).reshape((128, 512))
-            psum0 += nisa.nc_matmul(w0[:, :, 0, 2], X_pack0)
-            psum1 += nisa.nc_matmul(w1[:, :, 0, 2], X_pack0)
-
-            X_pack0[:, :] = nisa.tensor_copy(X_band[:, 1:17, 1:33]).reshape((128, 512))
-            psum0 += nisa.nc_matmul(w0[:, :, 1, 0], X_pack1)
-            psum1 += nisa.nc_matmul(w1[:, :, 1, 0], X_pack1)
-
-            X_pack1[:, :] = nisa.tensor_copy(X_band[:, 1:17, 2:34]).reshape((128, 512))
-            psum0 += nisa.nc_matmul(w0[:, :, 1, 1], X_pack0)
-            psum1 += nisa.nc_matmul(w1[:, :, 1, 1], X_pack0)
-
-            X_pack0[:, :] = nisa.tensor_copy(X_band[:, 2:18, 0:32]).reshape((128, 512))
-            psum0 += nisa.nc_matmul(w0[:, :, 1, 2], X_pack1)
-            psum1 += nisa.nc_matmul(w1[:, :, 1, 2], X_pack1)
-
-            X_pack1[:, :] = nisa.tensor_copy(X_band[:, 2:18, 1:33]).reshape((128, 512))
-            psum0 += nisa.nc_matmul(w0[:, :, 2, 0], X_pack0)
-            psum1 += nisa.nc_matmul(w1[:, :, 2, 0], X_pack0)
-
-            X_pack0[:, :] = nisa.tensor_copy(X_band[:, 2:18, 2:34]).reshape((128, 512))
-            psum0 += nisa.nc_matmul(w0[:, :, 2, 1], X_pack1)
-            psum1 += nisa.nc_matmul(w1[:, :, 2, 1], X_pack1)
-
-            psum0 += nisa.nc_matmul(w0[:, :, 2, 2], X_pack0)
-            psum1 += nisa.nc_matmul(w1[:, :, 2, 2], X_pack0)
-
-            out_flat0 = nl.ndarray(
-                shape=(128, 512),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
-            )
-            out_flat0[:, :] = nl.add(
-                psum0[:, :],
-                bias_sbuf[:, 0],
-            )
+            for i in nl.affine_range(3):
+                for j in nl.affine_range(3):
+                    X_packed = nl.ndarray(
+                        shape=(128, 512),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    X_packed[:, :] = nisa.tensor_copy(
+                        X_band[
+                            :,
+                            i : i + 16,
+                            j : j + 32,
+                        ]
+                    ).reshape((128, 512))
+                    psum0 += nisa.nc_matmul(
+                        w0[:, :, i, j],
+                        X_packed,
+                    )
+                    psum1 += nisa.nc_matmul(
+                        w1[:, :, i, j],
+                        X_packed,
+                    )
             nl.store(
                 X_out[
                     0,
@@ -697,17 +633,10 @@ def conv2d_nki(X, W, bias):
                     row_start : row_start + 16,
                     0:32,
                 ],
-                out_flat0.reshape((128, 16, 32)),
-            )
-
-            out_flat1 = nl.ndarray(
-                shape=(128, 512),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
-            )
-            out_flat1[:, :] = nl.add(
-                psum1[:, :],
-                bias_sbuf[:, 1],
+                nl.add(
+                    psum0,
+                    bias_sbuf[:, 0],
+                ).reshape((128, 16, 32)),
             )
             nl.store(
                 X_out[
@@ -716,7 +645,10 @@ def conv2d_nki(X, W, bias):
                     row_start : row_start + 16,
                     0:32,
                 ],
-                out_flat1.reshape((128, 16, 32)),
+                nl.add(
+                    psum1,
+                    bias_sbuf[:, 1],
+                ).reshape((128, 16, 32)),
             )
 
         for img in nl.sequential_range(1, 16):
@@ -747,52 +679,28 @@ def conv2d_nki(X, W, bias):
                     dtype=nl.float32,
                     buffer=nl.psum,
                 )
-
-                X_pack0[:, :] = nisa.tensor_copy(X_band[:, 0:16, 0:32]).reshape((128, 512))
-                X_pack1[:, :] = nisa.tensor_copy(X_band[:, 0:16, 1:33]).reshape((128, 512))
-                psum0 += nisa.nc_matmul(w0[:, :, 0, 0], X_pack0)
-                psum1 += nisa.nc_matmul(w1[:, :, 0, 0], X_pack0)
-
-                X_pack0[:, :] = nisa.tensor_copy(X_band[:, 0:16, 2:34]).reshape((128, 512))
-                psum0 += nisa.nc_matmul(w0[:, :, 0, 1], X_pack1)
-                psum1 += nisa.nc_matmul(w1[:, :, 0, 1], X_pack1)
-
-                X_pack1[:, :] = nisa.tensor_copy(X_band[:, 1:17, 0:32]).reshape((128, 512))
-                psum0 += nisa.nc_matmul(w0[:, :, 0, 2], X_pack0)
-                psum1 += nisa.nc_matmul(w1[:, :, 0, 2], X_pack0)
-
-                X_pack0[:, :] = nisa.tensor_copy(X_band[:, 1:17, 1:33]).reshape((128, 512))
-                psum0 += nisa.nc_matmul(w0[:, :, 1, 0], X_pack1)
-                psum1 += nisa.nc_matmul(w1[:, :, 1, 0], X_pack1)
-
-                X_pack1[:, :] = nisa.tensor_copy(X_band[:, 1:17, 2:34]).reshape((128, 512))
-                psum0 += nisa.nc_matmul(w0[:, :, 1, 1], X_pack0)
-                psum1 += nisa.nc_matmul(w1[:, :, 1, 1], X_pack0)
-
-                X_pack0[:, :] = nisa.tensor_copy(X_band[:, 2:18, 0:32]).reshape((128, 512))
-                psum0 += nisa.nc_matmul(w0[:, :, 1, 2], X_pack1)
-                psum1 += nisa.nc_matmul(w1[:, :, 1, 2], X_pack1)
-
-                X_pack1[:, :] = nisa.tensor_copy(X_band[:, 2:18, 1:33]).reshape((128, 512))
-                psum0 += nisa.nc_matmul(w0[:, :, 2, 0], X_pack0)
-                psum1 += nisa.nc_matmul(w1[:, :, 2, 0], X_pack0)
-
-                X_pack0[:, :] = nisa.tensor_copy(X_band[:, 2:18, 2:34]).reshape((128, 512))
-                psum0 += nisa.nc_matmul(w0[:, :, 2, 1], X_pack1)
-                psum1 += nisa.nc_matmul(w1[:, :, 2, 1], X_pack1)
-
-                psum0 += nisa.nc_matmul(w0[:, :, 2, 2], X_pack0)
-                psum1 += nisa.nc_matmul(w1[:, :, 2, 2], X_pack0)
-
-                out_flat0 = nl.ndarray(
-                    shape=(128, 512),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                out_flat0[:, :] = nl.add(
-                    psum0[:, :],
-                    bias_sbuf[:, 0],
-                )
+                for i in nl.affine_range(3):
+                    for j in nl.affine_range(3):
+                        X_packed = nl.ndarray(
+                            shape=(128, 512),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        X_packed[:, :] = nisa.tensor_copy(
+                            X_band[
+                                :,
+                                i : i + 16,
+                                j : j + 32,
+                            ]
+                        ).reshape((128, 512))
+                        psum0 += nisa.nc_matmul(
+                            w0[:, :, i, j],
+                            X_packed,
+                        )
+                        psum1 += nisa.nc_matmul(
+                            w1[:, :, i, j],
+                            X_packed,
+                        )
                 nl.store(
                     X_out[
                         img,
@@ -800,17 +708,10 @@ def conv2d_nki(X, W, bias):
                         row_start : row_start + 16,
                         0:32,
                     ],
-                    out_flat0.reshape((128, 16, 32)),
-                )
-
-                out_flat1 = nl.ndarray(
-                    shape=(128, 512),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                out_flat1[:, :] = nl.add(
-                    psum1[:, :],
-                    bias_sbuf[:, 1],
+                    nl.add(
+                        psum0,
+                        bias_sbuf[:, 0],
+                    ).reshape((128, 16, 32)),
                 )
                 nl.store(
                     X_out[
@@ -819,7 +720,10 @@ def conv2d_nki(X, W, bias):
                         row_start : row_start + 16,
                         0:32,
                     ],
-                    out_flat1.reshape((128, 16, 32)),
+                    nl.add(
+                        psum1,
+                        bias_sbuf[:, 1],
+                    ).reshape((128, 16, 32)),
                 )
 
         return X_out
