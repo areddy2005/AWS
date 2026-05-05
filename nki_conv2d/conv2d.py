@@ -78,19 +78,21 @@ def conv2d_nki(X, W, bias):
             buffer=nl.hbm,
         )
 
+        # local_gather: use 2D (par_dim, elems/partition); row-major flatten of the 18×34 H×W band.
         X_band_first = nl.ndarray(
-            shape=(128, 18, 34),
+            shape=(128, 18 * 34),
             dtype=X.dtype,
             buffer=nl.sbuf,
         )
-        X_band_first[:, :, :] = nl.load(
-            X[
-                0,
-                0:128,
-                0:18,
-                0:34,
-            ]
-        )
+        for hi in nl.sequential_range(18):
+            X_band_first[:, hi * 34 : (hi + 1) * 34] = nl.load(
+                X[
+                    0,
+                    0:128,
+                    hi,
+                    0:34,
+                ]
+            )
 
         W0_slab = nl.ndarray(
             shape=(128, 128, 3, 3),
@@ -166,7 +168,7 @@ def conv2d_nki(X, W, bias):
             num_elem_per_idx=32,
             num_valid_indices=16,
         )
-        for r in nl.affine_range(16):
+        for r in nl.sequential_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                 gathered[:, 0, r, :],
             )
@@ -180,7 +182,7 @@ def conv2d_nki(X, W, bias):
             num_elem_per_idx=32,
             num_valid_indices=16,
         )
-        for r in nl.affine_range(16):
+        for r in nl.sequential_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                 gathered[:, 0, r, :],
             )
@@ -194,7 +196,7 @@ def conv2d_nki(X, W, bias):
             num_elem_per_idx=32,
             num_valid_indices=16,
         )
-        for r in nl.affine_range(16):
+        for r in nl.sequential_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                 gathered[:, 0, r, :],
             )
@@ -208,7 +210,7 @@ def conv2d_nki(X, W, bias):
             num_elem_per_idx=32,
             num_valid_indices=16,
         )
-        for r in nl.affine_range(16):
+        for r in nl.sequential_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                 gathered[:, 0, r, :],
             )
@@ -222,7 +224,7 @@ def conv2d_nki(X, W, bias):
             num_elem_per_idx=32,
             num_valid_indices=16,
         )
-        for r in nl.affine_range(16):
+        for r in nl.sequential_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                 gathered[:, 0, r, :],
             )
@@ -236,7 +238,7 @@ def conv2d_nki(X, W, bias):
             num_elem_per_idx=32,
             num_valid_indices=16,
         )
-        for r in nl.affine_range(16):
+        for r in nl.sequential_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                 gathered[:, 0, r, :],
             )
@@ -250,7 +252,7 @@ def conv2d_nki(X, W, bias):
             num_elem_per_idx=32,
             num_valid_indices=16,
         )
-        for r in nl.affine_range(16):
+        for r in nl.sequential_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                 gathered[:, 0, r, :],
             )
@@ -264,7 +266,7 @@ def conv2d_nki(X, W, bias):
             num_elem_per_idx=32,
             num_valid_indices=16,
         )
-        for r in nl.affine_range(16):
+        for r in nl.sequential_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                 gathered[:, 0, r, :],
             )
@@ -278,7 +280,7 @@ def conv2d_nki(X, W, bias):
             num_elem_per_idx=32,
             num_valid_indices=16,
         )
-        for r in nl.affine_range(16):
+        for r in nl.sequential_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                 gathered[:, 0, r, :],
             )
@@ -329,18 +331,19 @@ def conv2d_nki(X, W, bias):
             row_start = rb * 16
 
             X_band = nl.ndarray(
-                shape=(128, 18, 34),
+                shape=(128, 18 * 34),
                 dtype=X.dtype,
                 buffer=nl.sbuf,
             )
-            X_band[:, :, :] = nl.load(
-                X[
-                    0,
-                    0:128,
-                    row_start : row_start + 18,
-                    0:34,
-                ]
-            )
+            for hi in nl.sequential_range(18):
+                X_band[:, hi * 34 : (hi + 1) * 34] = nl.load(
+                    X[
+                        0,
+                        0:128,
+                        row_start + hi,
+                        0:34,
+                    ]
+                )
 
             psum0 = nl.zeros(
                 shape=(128, 512),
@@ -366,7 +369,7 @@ def conv2d_nki(X, W, bias):
                 num_elem_per_idx=32,
                 num_valid_indices=16,
             )
-            for r in nl.affine_range(16):
+            for r in nl.sequential_range(16):
                 X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                     gather_a[:, 0, r, :],
                 )
@@ -378,7 +381,7 @@ def conv2d_nki(X, W, bias):
                 num_elem_per_idx=32,
                 num_valid_indices=16,
             )
-            for r in nl.affine_range(16):
+            for r in nl.sequential_range(16):
                 X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                     gather_b[:, 0, r, :],
                 )
@@ -392,7 +395,7 @@ def conv2d_nki(X, W, bias):
                 num_elem_per_idx=32,
                 num_valid_indices=16,
             )
-            for r in nl.affine_range(16):
+            for r in nl.sequential_range(16):
                 X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                     gather_a[:, 0, r, :],
                 )
@@ -406,7 +409,7 @@ def conv2d_nki(X, W, bias):
                 num_elem_per_idx=32,
                 num_valid_indices=16,
             )
-            for r in nl.affine_range(16):
+            for r in nl.sequential_range(16):
                 X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                     gather_b[:, 0, r, :],
                 )
@@ -420,7 +423,7 @@ def conv2d_nki(X, W, bias):
                 num_elem_per_idx=32,
                 num_valid_indices=16,
             )
-            for r in nl.affine_range(16):
+            for r in nl.sequential_range(16):
                 X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                     gather_a[:, 0, r, :],
                 )
@@ -434,7 +437,7 @@ def conv2d_nki(X, W, bias):
                 num_elem_per_idx=32,
                 num_valid_indices=16,
             )
-            for r in nl.affine_range(16):
+            for r in nl.sequential_range(16):
                 X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                     gather_b[:, 0, r, :],
                 )
@@ -448,7 +451,7 @@ def conv2d_nki(X, W, bias):
                 num_elem_per_idx=32,
                 num_valid_indices=16,
             )
-            for r in nl.affine_range(16):
+            for r in nl.sequential_range(16):
                 X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                     gather_a[:, 0, r, :],
                 )
@@ -462,7 +465,7 @@ def conv2d_nki(X, W, bias):
                 num_elem_per_idx=32,
                 num_valid_indices=16,
             )
-            for r in nl.affine_range(16):
+            for r in nl.sequential_range(16):
                 X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                     gather_b[:, 0, r, :],
                 )
@@ -476,7 +479,7 @@ def conv2d_nki(X, W, bias):
                 num_elem_per_idx=32,
                 num_valid_indices=16,
             )
-            for r in nl.affine_range(16):
+            for r in nl.sequential_range(16):
                 X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                     gather_a[:, 0, r, :],
                 )
@@ -531,18 +534,19 @@ def conv2d_nki(X, W, bias):
                 row_start = rb * 16
 
                 X_band = nl.ndarray(
-                    shape=(128, 18, 34),
+                    shape=(128, 18 * 34),
                     dtype=X.dtype,
                     buffer=nl.sbuf,
                 )
-                X_band[:, :, :] = nl.load(
-                    X[
-                        img,
-                        0:128,
-                        row_start : row_start + 18,
-                        0:34,
-                    ]
-                )
+                for hi in nl.sequential_range(18):
+                    X_band[:, hi * 34 : (hi + 1) * 34] = nl.load(
+                        X[
+                            img,
+                            0:128,
+                            row_start + hi,
+                            0:34,
+                        ]
+                    )
 
                 psum0 = nl.zeros(
                     shape=(128, 512),
@@ -568,7 +572,7 @@ def conv2d_nki(X, W, bias):
                     num_elem_per_idx=32,
                     num_valid_indices=16,
                 )
-                for r in nl.affine_range(16):
+                for r in nl.sequential_range(16):
                     X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                         gather_a[:, 0, r, :],
                     )
@@ -580,7 +584,7 @@ def conv2d_nki(X, W, bias):
                     num_elem_per_idx=32,
                     num_valid_indices=16,
                 )
-                for r in nl.affine_range(16):
+                for r in nl.sequential_range(16):
                     X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                         gather_b[:, 0, r, :],
                     )
@@ -594,7 +598,7 @@ def conv2d_nki(X, W, bias):
                     num_elem_per_idx=32,
                     num_valid_indices=16,
                 )
-                for r in nl.affine_range(16):
+                for r in nl.sequential_range(16):
                     X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                         gather_a[:, 0, r, :],
                     )
@@ -608,7 +612,7 @@ def conv2d_nki(X, W, bias):
                     num_elem_per_idx=32,
                     num_valid_indices=16,
                 )
-                for r in nl.affine_range(16):
+                for r in nl.sequential_range(16):
                     X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                         gather_b[:, 0, r, :],
                     )
@@ -622,7 +626,7 @@ def conv2d_nki(X, W, bias):
                     num_elem_per_idx=32,
                     num_valid_indices=16,
                 )
-                for r in nl.affine_range(16):
+                for r in nl.sequential_range(16):
                     X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                         gather_a[:, 0, r, :],
                     )
@@ -636,7 +640,7 @@ def conv2d_nki(X, W, bias):
                     num_elem_per_idx=32,
                     num_valid_indices=16,
                 )
-                for r in nl.affine_range(16):
+                for r in nl.sequential_range(16):
                     X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                         gather_b[:, 0, r, :],
                     )
@@ -650,7 +654,7 @@ def conv2d_nki(X, W, bias):
                     num_elem_per_idx=32,
                     num_valid_indices=16,
                 )
-                for r in nl.affine_range(16):
+                for r in nl.sequential_range(16):
                     X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                         gather_a[:, 0, r, :],
                     )
@@ -664,7 +668,7 @@ def conv2d_nki(X, W, bias):
                     num_elem_per_idx=32,
                     num_valid_indices=16,
                 )
-                for r in nl.affine_range(16):
+                for r in nl.sequential_range(16):
                     X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                         gather_b[:, 0, r, :],
                     )
@@ -678,7 +682,7 @@ def conv2d_nki(X, W, bias):
                     num_elem_per_idx=32,
                     num_valid_indices=16,
                 )
-                for r in nl.affine_range(16):
+                for r in nl.sequential_range(16):
                     X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                         gather_a[:, 0, r, :],
                     )
