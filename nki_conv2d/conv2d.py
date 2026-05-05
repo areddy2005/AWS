@@ -1078,7 +1078,7 @@ def conv2d_nki(X, W, bias):
                 buffer=nl.sbuf,
             )
 
-            for c_in_tile_idx in nl.affine_range(2):
+            for c_in_tile_idx in nl.sequential_range(0, 2):
                 X_band = nl.ndarray(
                     shape=(128, 18, 34),
                     dtype=X.dtype,
@@ -1194,7 +1194,7 @@ def conv2d_nki(X, W, bias):
                     buffer=nl.sbuf,
                 )
 
-                for c_in_tile_idx in nl.affine_range(2):
+                for c_in_tile_idx in nl.sequential_range(0, 2):
                     X_band = nl.ndarray(
                         shape=(128, 18, 34),
                         dtype=X.dtype,
