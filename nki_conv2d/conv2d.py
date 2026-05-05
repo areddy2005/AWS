@@ -857,6 +857,17 @@ def conv2d_nki(X, W, bias):
         bias_sbuf[:, 0] = nl.load(bias[0:128])
         bias_sbuf[:, 1] = nl.load(bias[128:256])
 
+        out0 = nl.ndarray(
+            shape=(128, 512),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
+        )
+        out1 = nl.ndarray(
+            shape=(128, 512),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
+        )
+
         psum0_first = nl.zeros(
             shape=(128, 512),
             dtype=nl.float32,
@@ -902,6 +913,8 @@ def conv2d_nki(X, W, bias):
                     w[:, :, 1, 0, i, j],
                     X_packed_first_block,
                 )
+        out0[:, :] = nisa.tensor_copy(psum0_first[:, :]).reshape((128, 512))
+        out1[:, :] = nisa.tensor_copy(psum1_first[:, :]).reshape((128, 512))
         nl.store(
             X_out[
                 0,
@@ -909,7 +922,7 @@ def conv2d_nki(X, W, bias):
                 0:8,
                 0:64,
             ],
-            psum0_first.reshape((128, 8, 64)),
+            out0.reshape((128, 8, 64)),
         )
         nl.store(
             X_out[
@@ -918,7 +931,7 @@ def conv2d_nki(X, W, bias):
                 0:8,
                 0:64,
             ],
-            psum1_first.reshape((128, 8, 64)),
+            out1.reshape((128, 8, 64)),
         )
 
         for row_block in nl.sequential_range(1, 8):
@@ -983,6 +996,8 @@ def conv2d_nki(X, W, bias):
                         w[:, :, 1, 0, i, j],
                         X_packed_row,
                     )
+            out0[:, :] = nisa.tensor_copy(psum0_row[:, :]).reshape((128, 512))
+            out1[:, :] = nisa.tensor_copy(psum1_row[:, :]).reshape((128, 512))
             nl.store(
                 X_out[
                     0,
@@ -990,7 +1005,7 @@ def conv2d_nki(X, W, bias):
                     row_start : row_start + 8,
                     0:64,
                 ],
-                psum0_row.reshape((128, 8, 64)),
+                out0.reshape((128, 8, 64)),
             )
             nl.store(
                 X_out[
@@ -999,7 +1014,7 @@ def conv2d_nki(X, W, bias):
                     row_start : row_start + 8,
                     0:64,
                 ],
-                psum1_row.reshape((128, 8, 64)),
+                out1.reshape((128, 8, 64)),
             )
 
         for img in nl.sequential_range(1, 4):
@@ -1065,6 +1080,8 @@ def conv2d_nki(X, W, bias):
                             w[:, :, 1, 0, i, j],
                             X_packed_img,
                         )
+                out0[:, :] = nisa.tensor_copy(psum0_img[:, :]).reshape((128, 512))
+                out1[:, :] = nisa.tensor_copy(psum1_img[:, :]).reshape((128, 512))
                 nl.store(
                     X_out[
                         img,
@@ -1072,7 +1089,7 @@ def conv2d_nki(X, W, bias):
                         row_start : row_start + 8,
                         0:64,
                     ],
-                    psum0_img.reshape((128, 8, 64)),
+                    out0.reshape((128, 8, 64)),
                 )
                 nl.store(
                     X_out[
@@ -1081,7 +1098,7 @@ def conv2d_nki(X, W, bias):
                         row_start : row_start + 8,
                         0:64,
                     ],
-                    psum1_img.reshape((128, 8, 64)),
+                    out1.reshape((128, 8, 64)),
                 )
 
         return X_out
