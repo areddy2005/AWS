@@ -672,17 +672,6 @@ def conv2d_nki(X, W, bias):
                 buffer=nl.psum,
             )
 
-            X_pack0 = nl.ndarray(
-                shape=(128, 512),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
-            )
-            X_pack1 = nl.ndarray(
-                shape=(128, 512),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
-            )
-
             X_pack0[:, :] = nisa.tensor_copy(X_band[:, 0:16, 0:32]).reshape((128, 512))
             X_pack1[:, :] = nisa.tensor_copy(X_band[:, 0:16, 1:33]).reshape((128, 512))
             psum0 += nisa.nc_matmul(w0[:, :, 0, 0], X_pack0)
@@ -786,17 +775,6 @@ def conv2d_nki(X, W, bias):
                     shape=(128, 512),
                     dtype=nl.float32,
                     buffer=nl.psum,
-                )
-
-                X_pack0 = nl.ndarray(
-                    shape=(128, 512),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                X_pack1 = nl.ndarray(
-                    shape=(128, 512),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
                 )
 
                 X_pack0[:, :] = nisa.tensor_copy(X_band[:, 0:16, 0:32]).reshape((128, 512))
