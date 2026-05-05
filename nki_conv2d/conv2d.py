@@ -855,8 +855,8 @@ def conv2d_nki(X, W, bias):
         )
 
         for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-            for kh in nl.affine_range(K):
-                for kw in nl.affine_range(K):
+            for kh in nl.sequential_range(0, K):
+                for kw in nl.sequential_range(0, K):
                     X_packed[:, :] = nisa.tensor_copy(
                         X_bands_first[
                             :,
@@ -909,8 +909,8 @@ def conv2d_nki(X, W, bias):
             )
 
             for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-                for kh in nl.affine_range(K):
-                    for kw in nl.affine_range(K):
+                for kh in nl.sequential_range(0, K):
+                    for kw in nl.sequential_range(0, K):
                         X_packed[:, :] = nisa.tensor_copy(
                             X_bands_first[
                                 :,
@@ -970,8 +970,8 @@ def conv2d_nki(X, W, bias):
             )
 
             for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-                for kh in nl.affine_range(K):
-                    for kw in nl.affine_range(K):
+                for kh in nl.sequential_range(0, K):
+                    for kw in nl.sequential_range(0, K):
                         X_packed[:, :] = nisa.tensor_copy(
                             X_bands[
                                 :,
@@ -1024,8 +1024,8 @@ def conv2d_nki(X, W, bias):
                 )
 
                 for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-                    for kh in nl.affine_range(K):
-                        for kw in nl.affine_range(K):
+                    for kh in nl.sequential_range(0, K):
+                        for kw in nl.sequential_range(0, K):
                             X_packed[:, :] = nisa.tensor_copy(
                                 X_bands[
                                     :,
@@ -1086,8 +1086,8 @@ def conv2d_nki(X, W, bias):
                 )
 
                 for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-                    for kh in nl.affine_range(K):
-                        for kw in nl.affine_range(K):
+                    for kh in nl.sequential_range(0, K):
+                        for kw in nl.sequential_range(0, K):
                             X_packed[:, :] = nisa.tensor_copy(
                                 X_bands[
                                     :,
@@ -1140,8 +1140,8 @@ def conv2d_nki(X, W, bias):
                     )
 
                     for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
-                        for kh in nl.affine_range(K):
-                            for kw in nl.affine_range(K):
+                        for kh in nl.sequential_range(0, K):
+                            for kw in nl.sequential_range(0, K):
                                 X_packed[:, :] = nisa.tensor_copy(
                                     X_bands[
                                         :,
