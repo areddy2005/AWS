@@ -765,7 +765,7 @@ def conv2d_nki(X, W, bias):
 
         return X_out
 
-    elif use_fastpath_in256_out256_3x3_b4:
+    elif False:
         # in256_out256 3x3 b4 34x34: 2 c_in tiles, ping-pong X_pack inside each tile (9 taps).
         X_out = nl.ndarray(
             shape=(4, 256, 32, 32),
