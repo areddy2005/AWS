@@ -796,12 +796,13 @@ def conv2d_nki(X, W, bias):
             ]
         )
 
-        W0_slab = nl.ndarray(
-            shape=(128, 128, 3, 3),
+        w = nl.ndarray(
+            shape=(128, 128, 2, 1, 3, 3),
             dtype=W.dtype,
             buffer=nl.sbuf,
         )
-        W1_slab = nl.ndarray(
+
+        W0_slab = nl.ndarray(
             shape=(128, 128, 3, 3),
             dtype=W.dtype,
             buffer=nl.sbuf,
@@ -814,6 +815,17 @@ def conv2d_nki(X, W, bias):
                 0:3,
             ]
         )
+        for i in nl.affine_range(3):
+            for j in nl.affine_range(3):
+                w[:, :, 0, 0, i, j] = nisa.nc_transpose(
+                    W0_slab[:, :, i, j],
+                )
+
+        W1_slab = nl.ndarray(
+            shape=(128, 128, 3, 3),
+            dtype=W.dtype,
+            buffer=nl.sbuf,
+        )
         W1_slab[:, :, :, :] = nl.load(
             W[
                 128:256,
@@ -822,16 +834,11 @@ def conv2d_nki(X, W, bias):
                 0:3,
             ]
         )
-
-        w = nl.ndarray(
-            shape=(128, 128, 2, 1, 3, 3),
-            dtype=W.dtype,
-            buffer=nl.sbuf,
-        )
         for i in nl.affine_range(3):
             for j in nl.affine_range(3):
-                w[:, :, 0, 0, i, j] = nisa.nc_transpose(W0_slab[:, :, i, j])
-                w[:, :, 1, 0, i, j] = nisa.nc_transpose(W1_slab[:, :, i, j])
+                w[:, :, 1, 0, i, j] = nisa.nc_transpose(
+                    W1_slab[:, :, i, j],
+                )
 
         bias_sbuf = nl.ndarray(
             shape=(128, 2),
