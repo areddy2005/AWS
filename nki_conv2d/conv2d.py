@@ -1270,17 +1270,6 @@ def conv2d_nki(X, W, bias):
 
         if block_rows % CHUNK_ROWS == 0:
             for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                out_chunk0_first = nl.ndarray(
-                    shape=(c_out_tile, CHUNK_ROWS, out_width),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for cr in nl.affine_range(CHUNK_ROWS):
-                    r = rr * CHUNK_ROWS + cr
-                    out_chunk0_first[:, cr, :] = nl.add(
-                        psum0_first[:, r * out_width : (r + 1) * out_width],
-                        bias_sbuf[:, 0],
-                    )
                 nl.store(
                     X_out[
                         0,
@@ -1288,21 +1277,16 @@ def conv2d_nki(X, W, bias):
                         rr * CHUNK_ROWS : (rr + 1) * CHUNK_ROWS,
                         :,
                     ],
-                    out_chunk0_first,
+                    nl.add(
+                        psum0_first[
+                            :,
+                            rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
+                        ],
+                        bias_sbuf[:, 0],
+                    ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
                 )
 
             for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                out_chunk1_first = nl.ndarray(
-                    shape=(c_out_tile, CHUNK_ROWS, out_width),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for cr in nl.affine_range(CHUNK_ROWS):
-                    r = rr * CHUNK_ROWS + cr
-                    out_chunk1_first[:, cr, :] = nl.add(
-                        psum1_first[:, r * out_width : (r + 1) * out_width],
-                        bias_sbuf[:, 1],
-                    )
                 nl.store(
                     X_out[
                         0,
@@ -1310,19 +1294,15 @@ def conv2d_nki(X, W, bias):
                         rr * CHUNK_ROWS : (rr + 1) * CHUNK_ROWS,
                         :,
                     ],
-                    out_chunk1_first,
+                    nl.add(
+                        psum1_first[
+                            :,
+                            rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
+                        ],
+                        bias_sbuf[:, 1],
+                    ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
                 )
         else:
-            out_buf0_first = nl.ndarray(
-                shape=(c_out_tile, block_rows, out_width),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
-            )
-            for r in nl.affine_range(block_rows):
-                out_buf0_first[:, r, :] = nl.add(
-                    psum0_first[:, r * out_width : (r + 1) * out_width],
-                    bias_sbuf[:, 0],
-                )
             nl.store(
                 X_out[
                     0,
@@ -1330,19 +1310,12 @@ def conv2d_nki(X, W, bias):
                     0 : block_rows,
                     :,
                 ],
-                out_buf0_first,
+                nl.add(
+                    psum0_first,
+                    bias_sbuf[:, 0],
+                ).reshape((c_out_tile, block_rows, out_width)),
             )
 
-            out_buf1_first = nl.ndarray(
-                shape=(c_out_tile, block_rows, out_width),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
-            )
-            for r in nl.affine_range(block_rows):
-                out_buf1_first[:, r, :] = nl.add(
-                    psum1_first[:, r * out_width : (r + 1) * out_width],
-                    bias_sbuf[:, 1],
-                )
             nl.store(
                 X_out[
                     0,
@@ -1350,7 +1323,10 @@ def conv2d_nki(X, W, bias):
                     0 : block_rows,
                     :,
                 ],
-                out_buf1_first,
+                nl.add(
+                    psum1_first,
+                    bias_sbuf[:, 1],
+                ).reshape((c_out_tile, block_rows, out_width)),
             )
 
     else:
@@ -1377,16 +1353,6 @@ def conv2d_nki(X, W, bias):
                             X_packed_first_block,
                         )
 
-            out_buf_first = nl.ndarray(
-                shape=(c_out_tile, block_rows, out_width),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
-            )
-            for r in nl.affine_range(block_rows):
-                out_buf_first[:, r, :] = nl.add(
-                    psum_packed_first[:, r * out_width : (r + 1) * out_width],
-                    bias_sbuf[:, c_out_idx],
-                )
             nl.store(
                 X_out[
                     0,
@@ -1394,7 +1360,10 @@ def conv2d_nki(X, W, bias):
                     0 : block_rows,
                     :,
                 ],
-                out_buf_first,
+                nl.add(
+                    psum_packed_first,
+                    bias_sbuf[:, c_out_idx],
+                ).reshape((c_out_tile, block_rows, out_width)),
             )
 
     # Remaining row blocks for img=0 (sequential_range(1, n_row_blocks) is empty if n_row_blocks==1)
@@ -1451,17 +1420,6 @@ def conv2d_nki(X, W, bias):
 
             if block_rows % CHUNK_ROWS == 0:
                 for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                    out_chunk0_row = nl.ndarray(
-                        shape=(c_out_tile, CHUNK_ROWS, out_width),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
-                    )
-                    for cr in nl.affine_range(CHUNK_ROWS):
-                        r = rr * CHUNK_ROWS + cr
-                        out_chunk0_row[:, cr, :] = nl.add(
-                            psum0_row[:, r * out_width : (r + 1) * out_width],
-                            bias_sbuf[:, 0],
-                        )
                     nl.store(
                         X_out[
                             0,
@@ -1469,21 +1427,16 @@ def conv2d_nki(X, W, bias):
                             row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
                             :,
                         ],
-                        out_chunk0_row,
+                        nl.add(
+                            psum0_row[
+                                :,
+                                rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
+                            ],
+                            bias_sbuf[:, 0],
+                        ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
                     )
 
                 for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                    out_chunk1_row = nl.ndarray(
-                        shape=(c_out_tile, CHUNK_ROWS, out_width),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
-                    )
-                    for cr in nl.affine_range(CHUNK_ROWS):
-                        r = rr * CHUNK_ROWS + cr
-                        out_chunk1_row[:, cr, :] = nl.add(
-                            psum1_row[:, r * out_width : (r + 1) * out_width],
-                            bias_sbuf[:, 1],
-                        )
                     nl.store(
                         X_out[
                             0,
@@ -1491,19 +1444,15 @@ def conv2d_nki(X, W, bias):
                             row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
                             :,
                         ],
-                        out_chunk1_row,
+                        nl.add(
+                            psum1_row[
+                                :,
+                                rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
+                            ],
+                            bias_sbuf[:, 1],
+                        ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
                     )
             else:
-                out_buf0_row = nl.ndarray(
-                    shape=(c_out_tile, block_rows, out_width),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    out_buf0_row[:, r, :] = nl.add(
-                        psum0_row[:, r * out_width : (r + 1) * out_width],
-                        bias_sbuf[:, 0],
-                    )
                 nl.store(
                     X_out[
                         0,
@@ -1511,19 +1460,12 @@ def conv2d_nki(X, W, bias):
                         row_start : row_start + block_rows,
                         :,
                     ],
-                    out_buf0_row,
+                    nl.add(
+                        psum0_row,
+                        bias_sbuf[:, 0],
+                    ).reshape((c_out_tile, block_rows, out_width)),
                 )
 
-                out_buf1_row = nl.ndarray(
-                    shape=(c_out_tile, block_rows, out_width),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    out_buf1_row[:, r, :] = nl.add(
-                        psum1_row[:, r * out_width : (r + 1) * out_width],
-                        bias_sbuf[:, 1],
-                    )
                 nl.store(
                     X_out[
                         0,
@@ -1531,7 +1473,10 @@ def conv2d_nki(X, W, bias):
                         row_start : row_start + block_rows,
                         :,
                     ],
-                    out_buf1_row,
+                    nl.add(
+                        psum1_row,
+                        bias_sbuf[:, 1],
+                    ).reshape((c_out_tile, block_rows, out_width)),
                 )
 
         else:
@@ -1558,16 +1503,6 @@ def conv2d_nki(X, W, bias):
                                 X_packed_row,
                             )
 
-                out_buf_row = nl.ndarray(
-                    shape=(c_out_tile, block_rows, out_width),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                for r in nl.affine_range(block_rows):
-                    out_buf_row[:, r, :] = nl.add(
-                        psum_packed_row[:, r * out_width : (r + 1) * out_width],
-                        bias_sbuf[:, c_out_idx],
-                    )
                 nl.store(
                     X_out[
                         0,
@@ -1575,7 +1510,10 @@ def conv2d_nki(X, W, bias):
                         row_start : row_start + block_rows,
                         :,
                     ],
-                    out_buf_row,
+                    nl.add(
+                        psum_packed_row,
+                        bias_sbuf[:, c_out_idx],
+                    ).reshape((c_out_tile, block_rows, out_width)),
                 )
 
     # All row blocks for img >= 1 (outer loop empty if batch_size==1)
@@ -1633,17 +1571,6 @@ def conv2d_nki(X, W, bias):
 
                 if block_rows % CHUNK_ROWS == 0:
                     for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                        out_chunk0_img = nl.ndarray(
-                            shape=(c_out_tile, CHUNK_ROWS, out_width),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for cr in nl.affine_range(CHUNK_ROWS):
-                            r = rr * CHUNK_ROWS + cr
-                            out_chunk0_img[:, cr, :] = nl.add(
-                                psum0_img[:, r * out_width : (r + 1) * out_width],
-                                bias_sbuf[:, 0],
-                            )
                         nl.store(
                             X_out[
                                 img,
@@ -1651,21 +1578,16 @@ def conv2d_nki(X, W, bias):
                                 row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
                                 :,
                             ],
-                            out_chunk0_img,
+                            nl.add(
+                                psum0_img[
+                                    :,
+                                    rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
+                                ],
+                                bias_sbuf[:, 0],
+                            ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
                         )
 
                     for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                        out_chunk1_img = nl.ndarray(
-                            shape=(c_out_tile, CHUNK_ROWS, out_width),
-                            dtype=X.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        for cr in nl.affine_range(CHUNK_ROWS):
-                            r = rr * CHUNK_ROWS + cr
-                            out_chunk1_img[:, cr, :] = nl.add(
-                                psum1_img[:, r * out_width : (r + 1) * out_width],
-                                bias_sbuf[:, 1],
-                            )
                         nl.store(
                             X_out[
                                 img,
@@ -1673,19 +1595,15 @@ def conv2d_nki(X, W, bias):
                                 row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
                                 :,
                             ],
-                            out_chunk1_img,
+                            nl.add(
+                                psum1_img[
+                                    :,
+                                    rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
+                                ],
+                                bias_sbuf[:, 1],
+                            ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
                         )
                 else:
-                    out_buf0_img = nl.ndarray(
-                        shape=(c_out_tile, block_rows, out_width),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
-                    )
-                    for r in nl.affine_range(block_rows):
-                        out_buf0_img[:, r, :] = nl.add(
-                            psum0_img[:, r * out_width : (r + 1) * out_width],
-                            bias_sbuf[:, 0],
-                        )
                     nl.store(
                         X_out[
                             img,
@@ -1693,19 +1611,12 @@ def conv2d_nki(X, W, bias):
                             row_start : row_start + block_rows,
                             :,
                         ],
-                        out_buf0_img,
+                        nl.add(
+                            psum0_img,
+                            bias_sbuf[:, 0],
+                        ).reshape((c_out_tile, block_rows, out_width)),
                     )
 
-                    out_buf1_img = nl.ndarray(
-                        shape=(c_out_tile, block_rows, out_width),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
-                    )
-                    for r in nl.affine_range(block_rows):
-                        out_buf1_img[:, r, :] = nl.add(
-                            psum1_img[:, r * out_width : (r + 1) * out_width],
-                            bias_sbuf[:, 1],
-                        )
                     nl.store(
                         X_out[
                             img,
@@ -1713,7 +1624,10 @@ def conv2d_nki(X, W, bias):
                             row_start : row_start + block_rows,
                             :,
                         ],
-                        out_buf1_img,
+                        nl.add(
+                            psum1_img,
+                            bias_sbuf[:, 1],
+                        ).reshape((c_out_tile, block_rows, out_width)),
                     )
 
             else:
@@ -1740,16 +1654,6 @@ def conv2d_nki(X, W, bias):
                                     X_packed_img,
                                 )
 
-                    out_buf_img = nl.ndarray(
-                        shape=(c_out_tile, block_rows, out_width),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
-                    )
-                    for r in nl.affine_range(block_rows):
-                        out_buf_img[:, r, :] = nl.add(
-                            psum_packed_img[:, r * out_width : (r + 1) * out_width],
-                            bias_sbuf[:, c_out_idx],
-                        )
                     nl.store(
                         X_out[
                             img,
@@ -1757,7 +1661,10 @@ def conv2d_nki(X, W, bias):
                             row_start : row_start + block_rows,
                             :,
                         ],
-                        out_buf_img,
+                        nl.add(
+                            psum_packed_img,
+                            bias_sbuf[:, c_out_idx],
+                        ).reshape((c_out_tile, block_rows, out_width)),
                     )
 
     return X_out
