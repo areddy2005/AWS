@@ -449,7 +449,6 @@ def conv2d_nki(X, W, bias):
         return X_out
 
     elif use_fastpath_b16_3x3:
-        
         X_out = nl.ndarray(
             shape=(16, 256, 32, 32),
             dtype=X.dtype,
@@ -542,7 +541,6 @@ def conv2d_nki(X, W, bias):
             buffer=nl.sbuf,
         )
 
-        # Ping-pong: depth-2 schedule; packs via tensor_copy(window).reshape(128,512).
         X_pack0[:, :] = nisa.tensor_copy(X_band_first[:, 0:16, 0:32]).reshape((128, 512))
         X_pack1[:, :] = nisa.tensor_copy(X_band_first[:, 0:16, 1:33]).reshape((128, 512))
         psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack0)
