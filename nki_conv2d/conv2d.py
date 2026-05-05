@@ -1174,9 +1174,6 @@ def conv2d_nki(X, W, bias):
     n_row_blocks = out_height // block_rows
     F_m = block_rows * out_width   # packed matmul free dimension
 
-    # Chunked HBM stores for out256 path (epilogue only); requires block_rows % CHUNK_ROWS == 0.
-    CHUNK_ROWS = 4
-
     # Output tensor in HBM
     X_out = nl.ndarray(
         shape=(batch_size, out_channels, out_height, out_width),
@@ -1268,66 +1265,31 @@ def conv2d_nki(X, W, bias):
                         X_packed_first_block,
                     )
 
-        if block_rows % CHUNK_ROWS == 0:
-            for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                nl.store(
-                    X_out[
-                        0,
-                        0 * c_out_tile : 1 * c_out_tile,
-                        rr * CHUNK_ROWS : (rr + 1) * CHUNK_ROWS,
-                        :,
-                    ],
-                    nl.add(
-                        psum0_first[
-                            :,
-                            rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
-                        ],
-                        bias_sbuf[:, 0],
-                    ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
-                )
+        nl.store(
+            X_out[
+                0,
+                0 * c_out_tile : 1 * c_out_tile,
+                0 : block_rows,
+                :,
+            ],
+            nl.add(
+                psum0_first,
+                bias_sbuf[:, 0],
+            ).reshape((c_out_tile, block_rows, out_width)),
+        )
 
-            for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                nl.store(
-                    X_out[
-                        0,
-                        1 * c_out_tile : 2 * c_out_tile,
-                        rr * CHUNK_ROWS : (rr + 1) * CHUNK_ROWS,
-                        :,
-                    ],
-                    nl.add(
-                        psum1_first[
-                            :,
-                            rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
-                        ],
-                        bias_sbuf[:, 1],
-                    ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
-                )
-        else:
-            nl.store(
-                X_out[
-                    0,
-                    0 * c_out_tile : 1 * c_out_tile,
-                    0 : block_rows,
-                    :,
-                ],
-                nl.add(
-                    psum0_first,
-                    bias_sbuf[:, 0],
-                ).reshape((c_out_tile, block_rows, out_width)),
-            )
-
-            nl.store(
-                X_out[
-                    0,
-                    1 * c_out_tile : 2 * c_out_tile,
-                    0 : block_rows,
-                    :,
-                ],
-                nl.add(
-                    psum1_first,
-                    bias_sbuf[:, 1],
-                ).reshape((c_out_tile, block_rows, out_width)),
-            )
+        nl.store(
+            X_out[
+                0,
+                1 * c_out_tile : 2 * c_out_tile,
+                0 : block_rows,
+                :,
+            ],
+            nl.add(
+                psum1_first,
+                bias_sbuf[:, 1],
+            ).reshape((c_out_tile, block_rows, out_width)),
+        )
 
     else:
         for c_out_idx in nl.affine_range(n_tiles_c_out):
@@ -1418,66 +1380,31 @@ def conv2d_nki(X, W, bias):
                             X_packed_row,
                         )
 
-            if block_rows % CHUNK_ROWS == 0:
-                for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                    nl.store(
-                        X_out[
-                            0,
-                            0 * c_out_tile : 1 * c_out_tile,
-                            row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
-                            :,
-                        ],
-                        nl.add(
-                            psum0_row[
-                                :,
-                                rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
-                            ],
-                            bias_sbuf[:, 0],
-                        ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
-                    )
+            nl.store(
+                X_out[
+                    0,
+                    0 * c_out_tile : 1 * c_out_tile,
+                    row_start : row_start + block_rows,
+                    :,
+                ],
+                nl.add(
+                    psum0_row,
+                    bias_sbuf[:, 0],
+                ).reshape((c_out_tile, block_rows, out_width)),
+            )
 
-                for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                    nl.store(
-                        X_out[
-                            0,
-                            1 * c_out_tile : 2 * c_out_tile,
-                            row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
-                            :,
-                        ],
-                        nl.add(
-                            psum1_row[
-                                :,
-                                rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
-                            ],
-                            bias_sbuf[:, 1],
-                        ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
-                    )
-            else:
-                nl.store(
-                    X_out[
-                        0,
-                        0 * c_out_tile : 1 * c_out_tile,
-                        row_start : row_start + block_rows,
-                        :,
-                    ],
-                    nl.add(
-                        psum0_row,
-                        bias_sbuf[:, 0],
-                    ).reshape((c_out_tile, block_rows, out_width)),
-                )
-
-                nl.store(
-                    X_out[
-                        0,
-                        1 * c_out_tile : 2 * c_out_tile,
-                        row_start : row_start + block_rows,
-                        :,
-                    ],
-                    nl.add(
-                        psum1_row,
-                        bias_sbuf[:, 1],
-                    ).reshape((c_out_tile, block_rows, out_width)),
-                )
+            nl.store(
+                X_out[
+                    0,
+                    1 * c_out_tile : 2 * c_out_tile,
+                    row_start : row_start + block_rows,
+                    :,
+                ],
+                nl.add(
+                    psum1_row,
+                    bias_sbuf[:, 1],
+                ).reshape((c_out_tile, block_rows, out_width)),
+            )
 
         else:
             for c_out_idx in nl.affine_range(n_tiles_c_out):
@@ -1569,66 +1496,31 @@ def conv2d_nki(X, W, bias):
                                 X_packed_img,
                             )
 
-                if block_rows % CHUNK_ROWS == 0:
-                    for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                        nl.store(
-                            X_out[
-                                img,
-                                0 * c_out_tile : 1 * c_out_tile,
-                                row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
-                                :,
-                            ],
-                            nl.add(
-                                psum0_img[
-                                    :,
-                                    rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
-                                ],
-                                bias_sbuf[:, 0],
-                            ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
-                        )
+                nl.store(
+                    X_out[
+                        img,
+                        0 * c_out_tile : 1 * c_out_tile,
+                        row_start : row_start + block_rows,
+                        :,
+                    ],
+                    nl.add(
+                        psum0_img,
+                        bias_sbuf[:, 0],
+                    ).reshape((c_out_tile, block_rows, out_width)),
+                )
 
-                    for rr in nl.affine_range(block_rows // CHUNK_ROWS):
-                        nl.store(
-                            X_out[
-                                img,
-                                1 * c_out_tile : 2 * c_out_tile,
-                                row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
-                                :,
-                            ],
-                            nl.add(
-                                psum1_img[
-                                    :,
-                                    rr * CHUNK_ROWS * out_width : (rr + 1) * CHUNK_ROWS * out_width,
-                                ],
-                                bias_sbuf[:, 1],
-                            ).reshape((c_out_tile, CHUNK_ROWS, out_width)),
-                        )
-                else:
-                    nl.store(
-                        X_out[
-                            img,
-                            0 * c_out_tile : 1 * c_out_tile,
-                            row_start : row_start + block_rows,
-                            :,
-                        ],
-                        nl.add(
-                            psum0_img,
-                            bias_sbuf[:, 0],
-                        ).reshape((c_out_tile, block_rows, out_width)),
-                    )
-
-                    nl.store(
-                        X_out[
-                            img,
-                            1 * c_out_tile : 2 * c_out_tile,
-                            row_start : row_start + block_rows,
-                            :,
-                        ],
-                        nl.add(
-                            psum1_img,
-                            bias_sbuf[:, 1],
-                        ).reshape((c_out_tile, block_rows, out_width)),
-                    )
+                nl.store(
+                    X_out[
+                        img,
+                        1 * c_out_tile : 2 * c_out_tile,
+                        row_start : row_start + block_rows,
+                        :,
+                    ],
+                    nl.add(
+                        psum1_img,
+                        bias_sbuf[:, 1],
+                    ).reshape((c_out_tile, block_rows, out_width)),
+                )
 
             else:
                 for c_out_idx in nl.affine_range(n_tiles_c_out):
