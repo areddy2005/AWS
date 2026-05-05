@@ -67,7 +67,7 @@ def conv2d_nki(X, W, bias):
         and input_height == 34
         and input_width == 34
         and K == 3
-        and X.dtype == nl.float32
+        and X.dtype == nl.float16
     )
 
     if use_fastpath:
