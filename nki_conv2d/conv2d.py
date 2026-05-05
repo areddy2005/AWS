@@ -153,16 +153,21 @@ def conv2d_nki(X, W, bias):
             buffer=nl.psum,
         )
 
-        # Tap (0,0): Phase-1 probe — pack via gather_flattened (same layout as row-copy).
+        # Tap (0,0): gather_flattened pack; idx via GpSimd iota from nl.arange affine expr (no host xfer).
         idx_first = nl.ndarray(
             shape=(128, 512),
             dtype=nl.uint32,
             buffer=nl.sbuf,
         )
         for r in nl.affine_range(16):
-            for c in nl.affine_range(32):
-                for p in nl.affine_range(128):
-                    idx_first[p, r * 32 + c] = r * 34 + c
+            # idx[:, r*32 + c] = (r + i)*34 + (c + j) with i=j=0; same 32 cols on every partition row.
+            col_expr = nl.arange(0, 32)[None, :]
+            part_expr = nl.arange(0, 128)[:, None]
+            expr_ij = part_expr * 0 + (r * 34 + col_expr)
+            idx_first[:, r * 32 : (r + 1) * 32] = nisa.iota(
+                expr_ij,
+                dtype=nl.uint32,
+            )
 
         X_pack0 = nl.gather_flattened(
             data=X_band_first,
