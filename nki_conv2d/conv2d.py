@@ -913,8 +913,18 @@ def conv2d_nki(X, W, bias):
                     w[:, :, 1, 0, i, j],
                     X_packed_first_block,
                 )
-        out0[:, :] = nisa.tensor_copy(psum0_first[:, :]).reshape((128, 512))
-        out1[:, :] = nisa.tensor_copy(psum1_first[:, :]).reshape((128, 512))
+        out0[:, :] = nisa.tensor_scalar(
+            psum0_first[:, :],
+            op0=np.add,
+            operand0=0.0,
+            dtype=X.dtype,
+        )
+        out1[:, :] = nisa.tensor_scalar(
+            psum1_first[:, :],
+            op0=np.add,
+            operand0=0.0,
+            dtype=X.dtype,
+        )
         nl.store(
             X_out[
                 0,
@@ -996,8 +1006,18 @@ def conv2d_nki(X, W, bias):
                         w[:, :, 1, 0, i, j],
                         X_packed_row,
                     )
-            out0[:, :] = nisa.tensor_copy(psum0_row[:, :]).reshape((128, 512))
-            out1[:, :] = nisa.tensor_copy(psum1_row[:, :]).reshape((128, 512))
+            out0[:, :] = nisa.tensor_scalar(
+                psum0_row[:, :],
+                op0=np.add,
+                operand0=0.0,
+                dtype=X.dtype,
+            )
+            out1[:, :] = nisa.tensor_scalar(
+                psum1_row[:, :],
+                op0=np.add,
+                operand0=0.0,
+                dtype=X.dtype,
+            )
             nl.store(
                 X_out[
                     0,
@@ -1080,8 +1100,18 @@ def conv2d_nki(X, W, bias):
                             w[:, :, 1, 0, i, j],
                             X_packed_img,
                         )
-                out0[:, :] = nisa.tensor_copy(psum0_img[:, :]).reshape((128, 512))
-                out1[:, :] = nisa.tensor_copy(psum1_img[:, :]).reshape((128, 512))
+                out0[:, :] = nisa.tensor_scalar(
+                    psum0_img[:, :],
+                    op0=np.add,
+                    operand0=0.0,
+                    dtype=X.dtype,
+                )
+                out1[:, :] = nisa.tensor_scalar(
+                    psum1_img[:, :],
+                    op0=np.add,
+                    operand0=0.0,
+                    dtype=X.dtype,
+                )
                 nl.store(
                     X_out[
                         img,
