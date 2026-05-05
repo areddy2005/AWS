@@ -782,16 +782,16 @@ def conv2d_nki(X, W, bias):
             buffer=nl.hbm,
         )
 
-        X_full_first = nl.ndarray(
-            shape=(128, 66, 66),
+        X_half_first = nl.ndarray(
+            shape=(128, 34, 66),
             dtype=X.dtype,
             buffer=nl.sbuf,
         )
-        X_full_first[:, :, :] = nl.load(
+        X_half_first[:, :, :] = nl.load(
             X[
                 0,
                 0:128,
-                0:66,
+                0:34,
                 0:66,
             ]
         )
@@ -841,7 +841,9 @@ def conv2d_nki(X, W, bias):
         bias_sbuf[:, 0] = nl.load(bias[0:128])
         bias_sbuf[:, 1] = nl.load(bias[128:256])
 
-        for rb in nl.sequential_range(8):
+        # img=0 top half (preloaded)
+        for rb in nl.sequential_range(4):
+            local_row = rb * 8
             row_start = rb * 8
 
             psum0 = nl.zeros(
@@ -863,9 +865,88 @@ def conv2d_nki(X, W, bias):
                         buffer=nl.sbuf,
                     )
                     X_packed[:, :] = nisa.tensor_copy(
-                        X_full_first[
+                        X_half_first[
                             :,
-                            row_start + i : row_start + i + 8,
+                            local_row + i : local_row + i + 8,
+                            j : j + 64,
+                        ]
+                    ).reshape((128, 512))
+
+                    psum0 += nisa.nc_matmul(
+                        w[:, :, 0, 0, i, j],
+                        X_packed,
+                    )
+                    psum1 += nisa.nc_matmul(
+                        w[:, :, 1, 0, i, j],
+                        X_packed,
+                    )
+
+            nl.store(
+                X_out[
+                    0,
+                    0:128,
+                    row_start : row_start + 8,
+                    0:64,
+                ],
+                nl.add(
+                    psum0,
+                    bias_sbuf[:, 0],
+                ).reshape((128, 8, 64)),
+            )
+            nl.store(
+                X_out[
+                    0,
+                    128:256,
+                    row_start : row_start + 8,
+                    0:64,
+                ],
+                nl.add(
+                    psum1,
+                    bias_sbuf[:, 1],
+                ).reshape((128, 8, 64)),
+            )
+
+        # img=0 bottom half
+        X_half = nl.ndarray(
+            shape=(128, 34, 66),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
+        )
+        X_half[:, :, :] = nl.load(
+            X[
+                0,
+                0:128,
+                32:66,
+                0:66,
+            ]
+        )
+
+        for rb in nl.sequential_range(4):
+            local_row = rb * 8
+            row_start = 32 + rb * 8
+
+            psum0 = nl.zeros(
+                shape=(128, 512),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
+            psum1 = nl.zeros(
+                shape=(128, 512),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
+
+            for i in nl.affine_range(3):
+                for j in nl.affine_range(3):
+                    X_packed = nl.ndarray(
+                        shape=(128, 512),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    X_packed[:, :] = nisa.tensor_copy(
+                        X_half[
+                            :,
+                            local_row + i : local_row + i + 8,
                             j : j + 64,
                         ]
                     ).reshape((128, 512))
@@ -905,21 +986,23 @@ def conv2d_nki(X, W, bias):
             )
 
         for img in nl.sequential_range(1, 4):
-            X_full = nl.ndarray(
-                shape=(128, 66, 66),
+            X_half = nl.ndarray(
+                shape=(128, 34, 66),
                 dtype=X.dtype,
                 buffer=nl.sbuf,
             )
-            X_full[:, :, :] = nl.load(
+
+            X_half[:, :, :] = nl.load(
                 X[
                     img,
                     0:128,
-                    0:66,
+                    0:34,
                     0:66,
                 ]
             )
 
-            for rb in nl.sequential_range(8):
+            for rb in nl.sequential_range(4):
+                local_row = rb * 8
                 row_start = rb * 8
 
                 psum0 = nl.zeros(
@@ -941,9 +1024,82 @@ def conv2d_nki(X, W, bias):
                             buffer=nl.sbuf,
                         )
                         X_packed[:, :] = nisa.tensor_copy(
-                            X_full[
+                            X_half[
                                 :,
-                                row_start + i : row_start + i + 8,
+                                local_row + i : local_row + i + 8,
+                                j : j + 64,
+                            ]
+                        ).reshape((128, 512))
+
+                        psum0 += nisa.nc_matmul(
+                            w[:, :, 0, 0, i, j],
+                            X_packed,
+                        )
+                        psum1 += nisa.nc_matmul(
+                            w[:, :, 1, 0, i, j],
+                            X_packed,
+                        )
+
+                nl.store(
+                    X_out[
+                        img,
+                        0:128,
+                        row_start : row_start + 8,
+                        0:64,
+                    ],
+                    nl.add(
+                        psum0,
+                        bias_sbuf[:, 0],
+                    ).reshape((128, 8, 64)),
+                )
+                nl.store(
+                    X_out[
+                        img,
+                        128:256,
+                        row_start : row_start + 8,
+                        0:64,
+                    ],
+                    nl.add(
+                        psum1,
+                        bias_sbuf[:, 1],
+                    ).reshape((128, 8, 64)),
+                )
+
+            X_half[:, :, :] = nl.load(
+                X[
+                    img,
+                    0:128,
+                    32:66,
+                    0:66,
+                ]
+            )
+
+            for rb in nl.sequential_range(4):
+                local_row = rb * 8
+                row_start = 32 + rb * 8
+
+                psum0 = nl.zeros(
+                    shape=(128, 512),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+                psum1 = nl.zeros(
+                    shape=(128, 512),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+
+                for i in nl.affine_range(3):
+                    for j in nl.affine_range(3):
+                        X_packed = nl.ndarray(
+                            shape=(128, 512),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        X_packed[:, :] = nisa.tensor_copy(
+                            X_half[
+                                :,
+                                local_row + i : local_row + i + 8,
                                 j : j + 64,
                             ]
                         ).reshape((128, 512))
