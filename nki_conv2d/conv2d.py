@@ -156,12 +156,10 @@ def conv2d_nki(X, W, bias):
         part_expr = nl.arange(0, 128)[:, None]
         local_row = nl.bitwise_and(part_expr, 15)
         idx16 = nl.ndarray(shape=(128, 1), dtype=nl.uint16, buffer=nl.sbuf)
-        gathered = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
         X_pack = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
 
         idx16[:, :] = nl.add(nl.multiply(local_row, 34), 0)
-        nisa.local_gather(
-            gathered,
+        gathered = nisa.local_gather(
             X_band_first,
             idx16,
             num_elem_per_idx=32,
@@ -172,8 +170,7 @@ def conv2d_nki(X, W, bias):
         psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack)
 
         idx16[:, :] = nl.add(nl.multiply(local_row, 34), 1)
-        nisa.local_gather(
-            gathered,
+        gathered = nisa.local_gather(
             X_band_first,
             idx16,
             num_elem_per_idx=32,
@@ -184,8 +181,7 @@ def conv2d_nki(X, W, bias):
         psum1_first += nisa.nc_matmul(w1[:, :, 0, 1], X_pack)
 
         idx16[:, :] = nl.add(nl.multiply(local_row, 34), 2)
-        nisa.local_gather(
-            gathered,
+        gathered = nisa.local_gather(
             X_band_first,
             idx16,
             num_elem_per_idx=32,
@@ -196,8 +192,7 @@ def conv2d_nki(X, W, bias):
         psum1_first += nisa.nc_matmul(w1[:, :, 0, 2], X_pack)
 
         idx16[:, :] = nl.add(nl.multiply(local_row, 34), 34)
-        nisa.local_gather(
-            gathered,
+        gathered = nisa.local_gather(
             X_band_first,
             idx16,
             num_elem_per_idx=32,
@@ -208,8 +203,7 @@ def conv2d_nki(X, W, bias):
         psum1_first += nisa.nc_matmul(w1[:, :, 1, 0], X_pack)
 
         idx16[:, :] = nl.add(nl.multiply(local_row, 34), 35)
-        nisa.local_gather(
-            gathered,
+        gathered = nisa.local_gather(
             X_band_first,
             idx16,
             num_elem_per_idx=32,
@@ -220,8 +214,7 @@ def conv2d_nki(X, W, bias):
         psum1_first += nisa.nc_matmul(w1[:, :, 1, 1], X_pack)
 
         idx16[:, :] = nl.add(nl.multiply(local_row, 34), 36)
-        nisa.local_gather(
-            gathered,
+        gathered = nisa.local_gather(
             X_band_first,
             idx16,
             num_elem_per_idx=32,
@@ -232,8 +225,7 @@ def conv2d_nki(X, W, bias):
         psum1_first += nisa.nc_matmul(w1[:, :, 1, 2], X_pack)
 
         idx16[:, :] = nl.add(nl.multiply(local_row, 34), 68)
-        nisa.local_gather(
-            gathered,
+        gathered = nisa.local_gather(
             X_band_first,
             idx16,
             num_elem_per_idx=32,
@@ -244,8 +236,7 @@ def conv2d_nki(X, W, bias):
         psum1_first += nisa.nc_matmul(w1[:, :, 2, 0], X_pack)
 
         idx16[:, :] = nl.add(nl.multiply(local_row, 34), 69)
-        nisa.local_gather(
-            gathered,
+        gathered = nisa.local_gather(
             X_band_first,
             idx16,
             num_elem_per_idx=32,
@@ -256,8 +247,7 @@ def conv2d_nki(X, W, bias):
         psum1_first += nisa.nc_matmul(w1[:, :, 2, 1], X_pack)
 
         idx16[:, :] = nl.add(nl.multiply(local_row, 34), 70)
-        nisa.local_gather(
-            gathered,
+        gathered = nisa.local_gather(
             X_band_first,
             idx16,
             num_elem_per_idx=32,
@@ -338,13 +328,11 @@ def conv2d_nki(X, W, bias):
             part_expr = nl.arange(0, 128)[:, None]
             local_row = nl.bitwise_and(part_expr, 15)
             idx16 = nl.ndarray(shape=(128, 1), dtype=nl.uint16, buffer=nl.sbuf)
-            gathered = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
             X_pack0 = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
             X_pack1 = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
 
             idx16[:, :] = nl.add(nl.multiply(local_row, 34), 0)
-            nisa.local_gather(
-                gathered,
+            gathered = nisa.local_gather(
                 X_band,
                 idx16,
                 num_elem_per_idx=32,
@@ -353,8 +341,7 @@ def conv2d_nki(X, W, bias):
             X_pack0[:, :] = nisa.tensor_copy(gathered)
 
             idx16[:, :] = nl.add(nl.multiply(local_row, 34), 1)
-            nisa.local_gather(
-                gathered,
+            gathered = nisa.local_gather(
                 X_band,
                 idx16,
                 num_elem_per_idx=32,
@@ -365,8 +352,7 @@ def conv2d_nki(X, W, bias):
             psum1 += nisa.nc_matmul(w1[:, :, 0, 0], X_pack0)
 
             idx16[:, :] = nl.add(nl.multiply(local_row, 34), 2)
-            nisa.local_gather(
-                gathered,
+            gathered = nisa.local_gather(
                 X_band,
                 idx16,
                 num_elem_per_idx=32,
@@ -377,8 +363,7 @@ def conv2d_nki(X, W, bias):
             psum1 += nisa.nc_matmul(w1[:, :, 0, 1], X_pack1)
 
             idx16[:, :] = nl.add(nl.multiply(local_row, 34), 34)
-            nisa.local_gather(
-                gathered,
+            gathered = nisa.local_gather(
                 X_band,
                 idx16,
                 num_elem_per_idx=32,
@@ -389,8 +374,7 @@ def conv2d_nki(X, W, bias):
             psum1 += nisa.nc_matmul(w1[:, :, 0, 2], X_pack0)
 
             idx16[:, :] = nl.add(nl.multiply(local_row, 34), 35)
-            nisa.local_gather(
-                gathered,
+            gathered = nisa.local_gather(
                 X_band,
                 idx16,
                 num_elem_per_idx=32,
@@ -401,8 +385,7 @@ def conv2d_nki(X, W, bias):
             psum1 += nisa.nc_matmul(w1[:, :, 1, 0], X_pack1)
 
             idx16[:, :] = nl.add(nl.multiply(local_row, 34), 36)
-            nisa.local_gather(
-                gathered,
+            gathered = nisa.local_gather(
                 X_band,
                 idx16,
                 num_elem_per_idx=32,
@@ -413,8 +396,7 @@ def conv2d_nki(X, W, bias):
             psum1 += nisa.nc_matmul(w1[:, :, 1, 1], X_pack0)
 
             idx16[:, :] = nl.add(nl.multiply(local_row, 34), 68)
-            nisa.local_gather(
-                gathered,
+            gathered = nisa.local_gather(
                 X_band,
                 idx16,
                 num_elem_per_idx=32,
@@ -425,8 +407,7 @@ def conv2d_nki(X, W, bias):
             psum1 += nisa.nc_matmul(w1[:, :, 1, 2], X_pack1)
 
             idx16[:, :] = nl.add(nl.multiply(local_row, 34), 69)
-            nisa.local_gather(
-                gathered,
+            gathered = nisa.local_gather(
                 X_band,
                 idx16,
                 num_elem_per_idx=32,
@@ -437,8 +418,7 @@ def conv2d_nki(X, W, bias):
             psum1 += nisa.nc_matmul(w1[:, :, 2, 0], X_pack0)
 
             idx16[:, :] = nl.add(nl.multiply(local_row, 34), 70)
-            nisa.local_gather(
-                gathered,
+            gathered = nisa.local_gather(
                 X_band,
                 idx16,
                 num_elem_per_idx=32,
@@ -523,13 +503,11 @@ def conv2d_nki(X, W, bias):
                 part_expr = nl.arange(0, 128)[:, None]
                 local_row = nl.bitwise_and(part_expr, 15)
                 idx16 = nl.ndarray(shape=(128, 1), dtype=nl.uint16, buffer=nl.sbuf)
-                gathered = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
                 X_pack0 = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
                 X_pack1 = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
 
                 idx16[:, :] = nl.add(nl.multiply(local_row, 34), 0)
-                nisa.local_gather(
-                    gathered,
+                gathered = nisa.local_gather(
                     X_band,
                     idx16,
                     num_elem_per_idx=32,
@@ -538,8 +516,7 @@ def conv2d_nki(X, W, bias):
                 X_pack0[:, :] = nisa.tensor_copy(gathered)
 
                 idx16[:, :] = nl.add(nl.multiply(local_row, 34), 1)
-                nisa.local_gather(
-                    gathered,
+                gathered = nisa.local_gather(
                     X_band,
                     idx16,
                     num_elem_per_idx=32,
@@ -550,8 +527,7 @@ def conv2d_nki(X, W, bias):
                 psum1 += nisa.nc_matmul(w1[:, :, 0, 0], X_pack0)
 
                 idx16[:, :] = nl.add(nl.multiply(local_row, 34), 2)
-                nisa.local_gather(
-                    gathered,
+                gathered = nisa.local_gather(
                     X_band,
                     idx16,
                     num_elem_per_idx=32,
@@ -562,8 +538,7 @@ def conv2d_nki(X, W, bias):
                 psum1 += nisa.nc_matmul(w1[:, :, 0, 1], X_pack1)
 
                 idx16[:, :] = nl.add(nl.multiply(local_row, 34), 34)
-                nisa.local_gather(
-                    gathered,
+                gathered = nisa.local_gather(
                     X_band,
                     idx16,
                     num_elem_per_idx=32,
@@ -574,8 +549,7 @@ def conv2d_nki(X, W, bias):
                 psum1 += nisa.nc_matmul(w1[:, :, 0, 2], X_pack0)
 
                 idx16[:, :] = nl.add(nl.multiply(local_row, 34), 35)
-                nisa.local_gather(
-                    gathered,
+                gathered = nisa.local_gather(
                     X_band,
                     idx16,
                     num_elem_per_idx=32,
@@ -586,8 +560,7 @@ def conv2d_nki(X, W, bias):
                 psum1 += nisa.nc_matmul(w1[:, :, 1, 0], X_pack1)
 
                 idx16[:, :] = nl.add(nl.multiply(local_row, 34), 36)
-                nisa.local_gather(
-                    gathered,
+                gathered = nisa.local_gather(
                     X_band,
                     idx16,
                     num_elem_per_idx=32,
@@ -598,8 +571,7 @@ def conv2d_nki(X, W, bias):
                 psum1 += nisa.nc_matmul(w1[:, :, 1, 1], X_pack0)
 
                 idx16[:, :] = nl.add(nl.multiply(local_row, 34), 68)
-                nisa.local_gather(
-                    gathered,
+                gathered = nisa.local_gather(
                     X_band,
                     idx16,
                     num_elem_per_idx=32,
@@ -610,8 +582,7 @@ def conv2d_nki(X, W, bias):
                 psum1 += nisa.nc_matmul(w1[:, :, 1, 2], X_pack1)
 
                 idx16[:, :] = nl.add(nl.multiply(local_row, 34), 69)
-                nisa.local_gather(
-                    gathered,
+                gathered = nisa.local_gather(
                     X_band,
                     idx16,
                     num_elem_per_idx=32,
@@ -622,8 +593,7 @@ def conv2d_nki(X, W, bias):
                 psum1 += nisa.nc_matmul(w1[:, :, 2, 0], X_pack0)
 
                 idx16[:, :] = nl.add(nl.multiply(local_row, 34), 70)
-                nisa.local_gather(
-                    gathered,
+                gathered = nisa.local_gather(
                     X_band,
                     idx16,
                     num_elem_per_idx=32,
