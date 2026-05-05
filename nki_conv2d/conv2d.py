@@ -16,7 +16,7 @@ os.environ["NEURON_CC_FLAGS"] = " --disable-dge "
 #   "C"     — X_pack[:,:] = slice.reshape((128,512)).
 #   "D"     — X_pack[:,:] = tensor_copy(slice.reshape((128,512))).
 # If NKI analyzes all branches, test one mode at a time (comment out other elif bodies).
-_FASTPATH_IN128_TAP00_RESHAPE_PROBE = "none"
+_FASTPATH_IN128_TAP00_RESHAPE_PROBE = "A"
 
 """
 Performs a 2D convolution operation using NKI.
