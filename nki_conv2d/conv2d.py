@@ -868,8 +868,16 @@ def conv2d_nki(X, W, bias):
             buffer=nl.psum,
         )
 
-        psum0_first[:, :] = nl.add(psum0_first[:, :], bias_sbuf[:, 0])
-        psum1_first[:, :] = nl.add(psum1_first[:, :], bias_sbuf[:, 1])
+        psum0_first[:, :] = nl.add(
+            psum0_first,
+            bias_sbuf[:, 0:1],
+            dtype=nl.float32,
+        )[:, :]
+        psum1_first[:, :] = nl.add(
+            psum1_first,
+            bias_sbuf[:, 1:2],
+            dtype=nl.float32,
+        )[:, :]
 
         for i in nl.affine_range(3):
             for j in nl.affine_range(3):
@@ -941,8 +949,16 @@ def conv2d_nki(X, W, bias):
                 buffer=nl.psum,
             )
 
-            psum0_row[:, :] = nl.add(psum0_row[:, :], bias_sbuf[:, 0])
-            psum1_row[:, :] = nl.add(psum1_row[:, :], bias_sbuf[:, 1])
+            psum0_row[:, :] = nl.add(
+                psum0_row,
+                bias_sbuf[:, 0:1],
+                dtype=nl.float32,
+            )[:, :]
+            psum1_row[:, :] = nl.add(
+                psum1_row,
+                bias_sbuf[:, 1:2],
+                dtype=nl.float32,
+            )[:, :]
 
             for i in nl.affine_range(3):
                 for j in nl.affine_range(3):
@@ -1015,8 +1031,16 @@ def conv2d_nki(X, W, bias):
                     buffer=nl.psum,
                 )
 
-                psum0_img[:, :] = nl.add(psum0_img[:, :], bias_sbuf[:, 0])
-                psum1_img[:, :] = nl.add(psum1_img[:, :], bias_sbuf[:, 1])
+                psum0_img[:, :] = nl.add(
+                    psum0_img,
+                    bias_sbuf[:, 0:1],
+                    dtype=nl.float32,
+                )[:, :]
+                psum1_img[:, :] = nl.add(
+                    psum1_img,
+                    bias_sbuf[:, 1:2],
+                    dtype=nl.float32,
+                )[:, :]
 
                 for i in nl.affine_range(3):
                     for j in nl.affine_range(3):
