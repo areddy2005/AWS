@@ -67,7 +67,7 @@ def conv2d_nki(X, W, bias):
         and input_height == 34
         and input_width == 34
         and K == 3
-        and X.dtype == nl.float16
+        and X.dtype == nl.float32
     )
 
     if use_fastpath:
@@ -153,23 +153,29 @@ def conv2d_nki(X, W, bias):
             buffer=nl.psum,
         )
 
-        X_pack0 = nl.ndarray(
+        # Tap (0,0): Phase-1 probe — pack via gather_flattened (same layout as row-copy).
+        idx_first = nl.ndarray(
             shape=(128, 512),
-            dtype=X.dtype,
+            dtype=nl.uint32,
             buffer=nl.sbuf,
         )
+        for r in nl.affine_range(16):
+            for c in nl.affine_range(32):
+                idx_first[:, r * 32 + c] = r * 34 + c
+
+        X_pack0 = nl.gather_flattened(
+            data=X_band_first,
+            indices=idx_first,
+            dtype=X.dtype,
+        )
+
         X_pack1 = nl.ndarray(
             shape=(128, 512),
             dtype=X.dtype,
             buffer=nl.sbuf,
         )
 
-        # Ping-pong: build next tap, then consume previous from other buffer.
-        for r in nl.affine_range(16):
-            X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                X_band_first[:, r + 0, 0 : 32],
-            )
-
+        # Ping-pong: taps (0,1)–(2,2) still use tensor_copy into X_pack0/X_pack1.
         for r in nl.affine_range(16):
             X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
                 X_band_first[:, r + 0, 1 : 33],
