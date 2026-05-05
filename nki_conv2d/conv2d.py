@@ -782,16 +782,16 @@ def conv2d_nki(X, W, bias):
             buffer=nl.hbm,
         )
 
-        X_bands_first = nl.ndarray(
-            shape=(128, 1, 10, 66),
+        X_full_first = nl.ndarray(
+            shape=(128, 66, 66),
             dtype=X.dtype,
             buffer=nl.sbuf,
         )
-        X_bands_first[:, 0, :, :] = nl.load(
+        X_full_first[:, :, :] = nl.load(
             X[
                 0,
                 0:128,
-                0:10,
+                0:66,
                 0:66,
             ]
         )
@@ -841,91 +841,15 @@ def conv2d_nki(X, W, bias):
         bias_sbuf[:, 0] = nl.load(bias[0:128])
         bias_sbuf[:, 1] = nl.load(bias[128:256])
 
-        psum0_first = nl.zeros(
-            shape=(128, 512),
-            dtype=nl.float32,
-            buffer=nl.psum,
-        )
-        psum1_first = nl.zeros(
-            shape=(128, 512),
-            dtype=nl.float32,
-            buffer=nl.psum,
-        )
+        for rb in nl.sequential_range(8):
+            row_start = rb * 8
 
-        for i in nl.affine_range(3):
-            for j in nl.affine_range(3):
-                X_packed_first_block = nl.ndarray(
-                    shape=(128, 512),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                X_packed_first_block[:, :] = nisa.tensor_copy(
-                    X_bands_first[
-                        :,
-                        0,
-                        i : i + 8,
-                        j : j + 64,
-                    ]
-                ).reshape((128, 512))
-
-                psum0_first += nisa.nc_matmul(
-                    w[:, :, 0, 0, i, j],
-                    X_packed_first_block,
-                )
-                psum1_first += nisa.nc_matmul(
-                    w[:, :, 1, 0, i, j],
-                    X_packed_first_block,
-                )
-
-        nl.store(
-            X_out[
-                0,
-                0:128,
-                0:8,
-                0:64,
-            ],
-            nl.add(
-                psum0_first,
-                bias_sbuf[:, 0],
-            ).reshape((128, 8, 64)),
-        )
-        nl.store(
-            X_out[
-                0,
-                128:256,
-                0:8,
-                0:64,
-            ],
-            nl.add(
-                psum1_first,
-                bias_sbuf[:, 1],
-            ).reshape((128, 8, 64)),
-        )
-
-        for row_block in nl.sequential_range(1, 8):
-            row_start = row_block * 8
-
-            X_bands = nl.ndarray(
-                shape=(128, 1, 10, 66),
-                dtype=X.dtype,
-                buffer=nl.sbuf,
-            )
-
-            X_bands[:, 0, :, :] = nl.load(
-                X[
-                    0,
-                    0:128,
-                    row_start : row_start + 10,
-                    0:66,
-                ]
-            )
-
-            psum0_row = nl.zeros(
+            psum0 = nl.zeros(
                 shape=(128, 512),
                 dtype=nl.float32,
                 buffer=nl.psum,
             )
-            psum1_row = nl.zeros(
+            psum1 = nl.zeros(
                 shape=(128, 512),
                 dtype=nl.float32,
                 buffer=nl.psum,
@@ -933,27 +857,26 @@ def conv2d_nki(X, W, bias):
 
             for i in nl.affine_range(3):
                 for j in nl.affine_range(3):
-                    X_packed_row = nl.ndarray(
+                    X_packed = nl.ndarray(
                         shape=(128, 512),
                         dtype=X.dtype,
                         buffer=nl.sbuf,
                     )
-                    X_packed_row[:, :] = nisa.tensor_copy(
-                        X_bands[
+                    X_packed[:, :] = nisa.tensor_copy(
+                        X_full_first[
                             :,
-                            0,
-                            i : i + 8,
+                            row_start + i : row_start + i + 8,
                             j : j + 64,
                         ]
                     ).reshape((128, 512))
 
-                    psum0_row += nisa.nc_matmul(
+                    psum0 += nisa.nc_matmul(
                         w[:, :, 0, 0, i, j],
-                        X_packed_row,
+                        X_packed,
                     )
-                    psum1_row += nisa.nc_matmul(
+                    psum1 += nisa.nc_matmul(
                         w[:, :, 1, 0, i, j],
-                        X_packed_row,
+                        X_packed,
                     )
 
             nl.store(
@@ -964,7 +887,7 @@ def conv2d_nki(X, W, bias):
                     0:64,
                 ],
                 nl.add(
-                    psum0_row,
+                    psum0,
                     bias_sbuf[:, 0],
                 ).reshape((128, 8, 64)),
             )
@@ -976,36 +899,35 @@ def conv2d_nki(X, W, bias):
                     0:64,
                 ],
                 nl.add(
-                    psum1_row,
+                    psum1,
                     bias_sbuf[:, 1],
                 ).reshape((128, 8, 64)),
             )
 
         for img in nl.sequential_range(1, 4):
-            for row_block in nl.sequential_range(8):
-                row_start = row_block * 8
+            X_full = nl.ndarray(
+                shape=(128, 66, 66),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
+            X_full[:, :, :] = nl.load(
+                X[
+                    img,
+                    0:128,
+                    0:66,
+                    0:66,
+                ]
+            )
 
-                X_bands = nl.ndarray(
-                    shape=(128, 1, 10, 66),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
+            for rb in nl.sequential_range(8):
+                row_start = rb * 8
 
-                X_bands[:, 0, :, :] = nl.load(
-                    X[
-                        img,
-                        0:128,
-                        row_start : row_start + 10,
-                        0:66,
-                    ]
-                )
-
-                psum0_img = nl.zeros(
+                psum0 = nl.zeros(
                     shape=(128, 512),
                     dtype=nl.float32,
                     buffer=nl.psum,
                 )
-                psum1_img = nl.zeros(
+                psum1 = nl.zeros(
                     shape=(128, 512),
                     dtype=nl.float32,
                     buffer=nl.psum,
@@ -1013,27 +935,26 @@ def conv2d_nki(X, W, bias):
 
                 for i in nl.affine_range(3):
                     for j in nl.affine_range(3):
-                        X_packed_img = nl.ndarray(
+                        X_packed = nl.ndarray(
                             shape=(128, 512),
                             dtype=X.dtype,
                             buffer=nl.sbuf,
                         )
-                        X_packed_img[:, :] = nisa.tensor_copy(
-                            X_bands[
+                        X_packed[:, :] = nisa.tensor_copy(
+                            X_full[
                                 :,
-                                0,
-                                i : i + 8,
+                                row_start + i : row_start + i + 8,
                                 j : j + 64,
                             ]
                         ).reshape((128, 512))
 
-                        psum0_img += nisa.nc_matmul(
+                        psum0 += nisa.nc_matmul(
                             w[:, :, 0, 0, i, j],
-                            X_packed_img,
+                            X_packed,
                         )
-                        psum1_img += nisa.nc_matmul(
+                        psum1 += nisa.nc_matmul(
                             w[:, :, 1, 0, i, j],
-                            X_packed_img,
+                            X_packed,
                         )
 
                 nl.store(
@@ -1044,7 +965,7 @@ def conv2d_nki(X, W, bias):
                         0:64,
                     ],
                     nl.add(
-                        psum0_img,
+                        psum0,
                         bias_sbuf[:, 0],
                     ).reshape((128, 8, 64)),
                 )
@@ -1056,7 +977,7 @@ def conv2d_nki(X, W, bias):
                         0:64,
                     ],
                     nl.add(
-                        psum1_img,
+                        psum1,
                         bias_sbuf[:, 1],
                     ).reshape((128, 8, 64)),
                 )
