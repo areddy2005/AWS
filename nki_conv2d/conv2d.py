@@ -8,6 +8,16 @@ import neuronxcc.nki.isa as nisa
 os.environ["NEURON_FRAMEWORK_DEBUG"] = "1"
 os.environ["NEURON_CC_FLAGS"] = " --disable-dge "
 
+# First-block tap (0,0) only, in128 b4 fast path: reshape compile probes. Edit before compile.
+#   "none"  — 16× row tensor_copy into X_pack (baseline).
+#   "A"     — slice view .reshape((128,512)) → nc_matmul.
+#   "B"     — tensor_copy(slice) result .reshape → nc_matmul.
+#   "B_buf" — copy into allocated (128,16,32) tmp then .reshape (base buffer reshape probe).
+#   "C"     — X_pack[:,:] = slice.reshape((128,512)).
+#   "D"     — X_pack[:,:] = tensor_copy(slice.reshape((128,512))).
+# If NKI analyzes all branches, test one mode at a time (comment out other elif bodies).
+_FASTPATH_IN128_TAP00_RESHAPE_PROBE = "none"
+
 """
 Performs a 2D convolution operation using NKI.
 Args:
@@ -71,28 +81,26 @@ def conv2d_nki(X, W, bias):
     )
 
     if use_fastpath:
-        # Shape-specialized 3x3 b4 34x34: Probe B on full path — each tap local_gather then 16× flatten-copy into (128,512) X_pack / X_pack0 / X_pack1, then nc_matmul on those packs.
+        # in128_out256 3x3 b4 34x34. Tap (0,0): reshape probes only; taps (0,1)–(2,2): row-wise tensor_copy.
         X_out = nl.ndarray(
             shape=(4, 256, 32, 32),
             dtype=X.dtype,
             buffer=nl.hbm,
         )
 
-        # local_gather: use 2D (par_dim, elems/partition); row-major flatten of the 18×34 H×W band.
         X_band_first = nl.ndarray(
-            shape=(128, 18 * 34),
+            shape=(128, 18, 34),
             dtype=X.dtype,
             buffer=nl.sbuf,
         )
-        for hi in nl.sequential_range(18):
-            X_band_first[:, hi * 34 : (hi + 1) * 34] = nl.load(
-                X[
-                    0,
-                    0:128,
-                    hi,
-                    0:34,
-                ]
-            )
+        X_band_first[:, :, :] = nl.load(
+            X[
+                0,
+                0:128,
+                0:18,
+                0:34,
+            ]
+        )
 
         W0_slab = nl.ndarray(
             shape=(128, 128, 3, 3),
@@ -155,134 +163,106 @@ def conv2d_nki(X, W, bias):
             buffer=nl.psum,
         )
 
-        part_expr = nl.arange(0, 128)[:, None]
-        local_row = nl.bitwise_and(part_expr, 15)
-        idx16 = nl.ndarray(shape=(128, 1), dtype=nl.uint16, buffer=nl.sbuf)
-        # Probe B: local_gather → explicit flatten-copy into (128,512) X_pack (all 9 taps); shape validation.
         X_pack = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
 
-        idx16[:, :] = nl.add(nl.multiply(local_row, 34), 0)
-        gathered = nisa.local_gather(
-            X_band_first,
-            idx16,
-            num_elem_per_idx=32,
-            num_valid_indices=16,
-        )
-        for r in nl.sequential_range(16):
-            X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                gathered[:, 0, r, :],
+        _tap00_probe = _FASTPATH_IN128_TAP00_RESHAPE_PROBE
+        if _tap00_probe == "none":
+            for r in nl.affine_range(16):
+                X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
+                    X_band_first[:, r, 0:32],
+                )
+            psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack)
+            psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack)
+        elif _tap00_probe == "A":
+            X_view = X_band_first[:, 0:16, 0:32]
+            X_pack_00 = X_view.reshape((128, 512))
+            psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack_00)
+            psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack_00)
+        elif _tap00_probe == "B":
+            _ttmp = nisa.tensor_copy(X_band_first[:, 0:16, 0:32])
+            X_pack_00 = _ttmp.reshape((128, 512))
+            psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack_00)
+            psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack_00)
+        elif _tap00_probe == "B_buf":
+            _tmp_tap00 = nl.ndarray(
+                shape=(128, 16, 32),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
             )
-        psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack)
-        psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack)
+            _tmp_tap00[:, :, :] = nisa.tensor_copy(X_band_first[:, 0:16, 0:32])
+            X_pack_00 = _tmp_tap00.reshape((128, 512))
+            psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack_00)
+            psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack_00)
+        elif _tap00_probe == "C":
+            X_pack[:, :] = X_band_first[:, 0:16, 0:32].reshape((128, 512))
+            psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack)
+            psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack)
+        elif _tap00_probe == "D":
+            X_pack[:, :] = nisa.tensor_copy(
+                X_band_first[:, 0:16, 0:32].reshape((128, 512))
+            )
+            psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack)
+            psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack)
+        else:
+            for r in nl.affine_range(16):
+                X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
+                    X_band_first[:, r, 0:32],
+                )
+            psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack)
+            psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack)
 
-        idx16[:, :] = nl.add(nl.multiply(local_row, 34), 1)
-        gathered = nisa.local_gather(
-            X_band_first,
-            idx16,
-            num_elem_per_idx=32,
-            num_valid_indices=16,
-        )
-        for r in nl.sequential_range(16):
+        for r in nl.affine_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                gathered[:, 0, r, :],
+                X_band_first[:, r, 1:33],
             )
         psum0_first += nisa.nc_matmul(w0[:, :, 0, 1], X_pack)
         psum1_first += nisa.nc_matmul(w1[:, :, 0, 1], X_pack)
 
-        idx16[:, :] = nl.add(nl.multiply(local_row, 34), 2)
-        gathered = nisa.local_gather(
-            X_band_first,
-            idx16,
-            num_elem_per_idx=32,
-            num_valid_indices=16,
-        )
-        for r in nl.sequential_range(16):
+        for r in nl.affine_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                gathered[:, 0, r, :],
+                X_band_first[:, r, 2:34],
             )
         psum0_first += nisa.nc_matmul(w0[:, :, 0, 2], X_pack)
         psum1_first += nisa.nc_matmul(w1[:, :, 0, 2], X_pack)
 
-        idx16[:, :] = nl.add(nl.multiply(local_row, 34), 34)
-        gathered = nisa.local_gather(
-            X_band_first,
-            idx16,
-            num_elem_per_idx=32,
-            num_valid_indices=16,
-        )
-        for r in nl.sequential_range(16):
+        for r in nl.affine_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                gathered[:, 0, r, :],
+                X_band_first[:, r + 1, 0:32],
             )
         psum0_first += nisa.nc_matmul(w0[:, :, 1, 0], X_pack)
         psum1_first += nisa.nc_matmul(w1[:, :, 1, 0], X_pack)
 
-        idx16[:, :] = nl.add(nl.multiply(local_row, 34), 35)
-        gathered = nisa.local_gather(
-            X_band_first,
-            idx16,
-            num_elem_per_idx=32,
-            num_valid_indices=16,
-        )
-        for r in nl.sequential_range(16):
+        for r in nl.affine_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                gathered[:, 0, r, :],
+                X_band_first[:, r + 1, 1:33],
             )
         psum0_first += nisa.nc_matmul(w0[:, :, 1, 1], X_pack)
         psum1_first += nisa.nc_matmul(w1[:, :, 1, 1], X_pack)
 
-        idx16[:, :] = nl.add(nl.multiply(local_row, 34), 36)
-        gathered = nisa.local_gather(
-            X_band_first,
-            idx16,
-            num_elem_per_idx=32,
-            num_valid_indices=16,
-        )
-        for r in nl.sequential_range(16):
+        for r in nl.affine_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                gathered[:, 0, r, :],
+                X_band_first[:, r + 1, 2:34],
             )
         psum0_first += nisa.nc_matmul(w0[:, :, 1, 2], X_pack)
         psum1_first += nisa.nc_matmul(w1[:, :, 1, 2], X_pack)
 
-        idx16[:, :] = nl.add(nl.multiply(local_row, 34), 68)
-        gathered = nisa.local_gather(
-            X_band_first,
-            idx16,
-            num_elem_per_idx=32,
-            num_valid_indices=16,
-        )
-        for r in nl.sequential_range(16):
+        for r in nl.affine_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                gathered[:, 0, r, :],
+                X_band_first[:, r + 2, 0:32],
             )
         psum0_first += nisa.nc_matmul(w0[:, :, 2, 0], X_pack)
         psum1_first += nisa.nc_matmul(w1[:, :, 2, 0], X_pack)
 
-        idx16[:, :] = nl.add(nl.multiply(local_row, 34), 69)
-        gathered = nisa.local_gather(
-            X_band_first,
-            idx16,
-            num_elem_per_idx=32,
-            num_valid_indices=16,
-        )
-        for r in nl.sequential_range(16):
+        for r in nl.affine_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                gathered[:, 0, r, :],
+                X_band_first[:, r + 2, 1:33],
             )
         psum0_first += nisa.nc_matmul(w0[:, :, 2, 1], X_pack)
         psum1_first += nisa.nc_matmul(w1[:, :, 2, 1], X_pack)
 
-        idx16[:, :] = nl.add(nl.multiply(local_row, 34), 70)
-        gathered = nisa.local_gather(
-            X_band_first,
-            idx16,
-            num_elem_per_idx=32,
-            num_valid_indices=16,
-        )
-        for r in nl.sequential_range(16):
+        for r in nl.affine_range(16):
             X_pack[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                gathered[:, 0, r, :],
+                X_band_first[:, r + 2, 2:34],
             )
         psum0_first += nisa.nc_matmul(w0[:, :, 2, 2], X_pack)
         psum1_first += nisa.nc_matmul(w1[:, :, 2, 2], X_pack)
@@ -331,19 +311,18 @@ def conv2d_nki(X, W, bias):
             row_start = rb * 16
 
             X_band = nl.ndarray(
-                shape=(128, 18 * 34),
+                shape=(128, 18, 34),
                 dtype=X.dtype,
                 buffer=nl.sbuf,
             )
-            for hi in nl.sequential_range(18):
-                X_band[:, hi * 34 : (hi + 1) * 34] = nl.load(
-                    X[
-                        0,
-                        0:128,
-                        row_start + hi,
-                        0:34,
-                    ]
-                )
+            X_band[:, :, :] = nl.load(
+                X[
+                    0,
+                    0:128,
+                    row_start : row_start + 18,
+                    0:34,
+                ]
+            )
 
             psum0 = nl.zeros(
                 shape=(128, 512),
@@ -356,132 +335,73 @@ def conv2d_nki(X, W, bias):
                 buffer=nl.psum,
             )
 
-            part_expr = nl.arange(0, 128)[:, None]
-            local_row = nl.bitwise_and(part_expr, 15)
-            idx16 = nl.ndarray(shape=(128, 1), dtype=nl.uint16, buffer=nl.sbuf)
-            X_pack0 = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
-            X_pack1 = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
-
-            idx16[:, :] = nl.add(nl.multiply(local_row, 34), 0)
-            gather_a = nisa.local_gather(
-                X_band,
-                idx16,
-                num_elem_per_idx=32,
-                num_valid_indices=16,
+            X_pack0 = nl.ndarray(
+                shape=(128, 512),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
             )
-            for r in nl.sequential_range(16):
+            X_pack1 = nl.ndarray(
+                shape=(128, 512),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
+
+            for r in nl.affine_range(16):
                 X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                    gather_a[:, 0, r, :],
+                    X_band[:, r + 0, 0:32],
                 )
-
-            idx16[:, :] = nl.add(nl.multiply(local_row, 34), 1)
-            gather_b = nisa.local_gather(
-                X_band,
-                idx16,
-                num_elem_per_idx=32,
-                num_valid_indices=16,
-            )
-            for r in nl.sequential_range(16):
+            for r in nl.affine_range(16):
                 X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                    gather_b[:, 0, r, :],
+                    X_band[:, r + 0, 1:33],
                 )
             psum0 += nisa.nc_matmul(w0[:, :, 0, 0], X_pack0)
             psum1 += nisa.nc_matmul(w1[:, :, 0, 0], X_pack0)
 
-            idx16[:, :] = nl.add(nl.multiply(local_row, 34), 2)
-            gather_a = nisa.local_gather(
-                X_band,
-                idx16,
-                num_elem_per_idx=32,
-                num_valid_indices=16,
-            )
-            for r in nl.sequential_range(16):
+            for r in nl.affine_range(16):
                 X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                    gather_a[:, 0, r, :],
+                    X_band[:, r + 0, 2:34],
                 )
             psum0 += nisa.nc_matmul(w0[:, :, 0, 1], X_pack1)
             psum1 += nisa.nc_matmul(w1[:, :, 0, 1], X_pack1)
 
-            idx16[:, :] = nl.add(nl.multiply(local_row, 34), 34)
-            gather_b = nisa.local_gather(
-                X_band,
-                idx16,
-                num_elem_per_idx=32,
-                num_valid_indices=16,
-            )
-            for r in nl.sequential_range(16):
+            for r in nl.affine_range(16):
                 X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                    gather_b[:, 0, r, :],
+                    X_band[:, r + 1, 0:32],
                 )
             psum0 += nisa.nc_matmul(w0[:, :, 0, 2], X_pack0)
             psum1 += nisa.nc_matmul(w1[:, :, 0, 2], X_pack0)
 
-            idx16[:, :] = nl.add(nl.multiply(local_row, 34), 35)
-            gather_a = nisa.local_gather(
-                X_band,
-                idx16,
-                num_elem_per_idx=32,
-                num_valid_indices=16,
-            )
-            for r in nl.sequential_range(16):
+            for r in nl.affine_range(16):
                 X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                    gather_a[:, 0, r, :],
+                    X_band[:, r + 1, 1:33],
                 )
             psum0 += nisa.nc_matmul(w0[:, :, 1, 0], X_pack1)
             psum1 += nisa.nc_matmul(w1[:, :, 1, 0], X_pack1)
 
-            idx16[:, :] = nl.add(nl.multiply(local_row, 34), 36)
-            gather_b = nisa.local_gather(
-                X_band,
-                idx16,
-                num_elem_per_idx=32,
-                num_valid_indices=16,
-            )
-            for r in nl.sequential_range(16):
+            for r in nl.affine_range(16):
                 X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                    gather_b[:, 0, r, :],
+                    X_band[:, r + 1, 2:34],
                 )
             psum0 += nisa.nc_matmul(w0[:, :, 1, 1], X_pack0)
             psum1 += nisa.nc_matmul(w1[:, :, 1, 1], X_pack0)
 
-            idx16[:, :] = nl.add(nl.multiply(local_row, 34), 68)
-            gather_a = nisa.local_gather(
-                X_band,
-                idx16,
-                num_elem_per_idx=32,
-                num_valid_indices=16,
-            )
-            for r in nl.sequential_range(16):
+            for r in nl.affine_range(16):
                 X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                    gather_a[:, 0, r, :],
+                    X_band[:, r + 2, 0:32],
                 )
             psum0 += nisa.nc_matmul(w0[:, :, 1, 2], X_pack1)
             psum1 += nisa.nc_matmul(w1[:, :, 1, 2], X_pack1)
 
-            idx16[:, :] = nl.add(nl.multiply(local_row, 34), 69)
-            gather_b = nisa.local_gather(
-                X_band,
-                idx16,
-                num_elem_per_idx=32,
-                num_valid_indices=16,
-            )
-            for r in nl.sequential_range(16):
+            for r in nl.affine_range(16):
                 X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                    gather_b[:, 0, r, :],
+                    X_band[:, r + 2, 1:33],
                 )
             psum0 += nisa.nc_matmul(w0[:, :, 2, 0], X_pack0)
             psum1 += nisa.nc_matmul(w1[:, :, 2, 0], X_pack0)
 
-            idx16[:, :] = nl.add(nl.multiply(local_row, 34), 70)
-            gather_a = nisa.local_gather(
-                X_band,
-                idx16,
-                num_elem_per_idx=32,
-                num_valid_indices=16,
-            )
-            for r in nl.sequential_range(16):
+            for r in nl.affine_range(16):
                 X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                    gather_a[:, 0, r, :],
+                    X_band[:, r + 2, 2:34],
                 )
             psum0 += nisa.nc_matmul(w0[:, :, 2, 1], X_pack1)
             psum1 += nisa.nc_matmul(w1[:, :, 2, 1], X_pack1)
@@ -534,19 +454,18 @@ def conv2d_nki(X, W, bias):
                 row_start = rb * 16
 
                 X_band = nl.ndarray(
-                    shape=(128, 18 * 34),
+                    shape=(128, 18, 34),
                     dtype=X.dtype,
                     buffer=nl.sbuf,
                 )
-                for hi in nl.sequential_range(18):
-                    X_band[:, hi * 34 : (hi + 1) * 34] = nl.load(
-                        X[
-                            img,
-                            0:128,
-                            row_start + hi,
-                            0:34,
-                        ]
-                    )
+                X_band[:, :, :] = nl.load(
+                    X[
+                        img,
+                        0:128,
+                        row_start : row_start + 18,
+                        0:34,
+                    ]
+                )
 
                 psum0 = nl.zeros(
                     shape=(128, 512),
@@ -559,132 +478,73 @@ def conv2d_nki(X, W, bias):
                     buffer=nl.psum,
                 )
 
-                part_expr = nl.arange(0, 128)[:, None]
-                local_row = nl.bitwise_and(part_expr, 15)
-                idx16 = nl.ndarray(shape=(128, 1), dtype=nl.uint16, buffer=nl.sbuf)
-                X_pack0 = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
-                X_pack1 = nl.ndarray(shape=(128, 512), dtype=X.dtype, buffer=nl.sbuf)
-
-                idx16[:, :] = nl.add(nl.multiply(local_row, 34), 0)
-                gather_a = nisa.local_gather(
-                    X_band,
-                    idx16,
-                    num_elem_per_idx=32,
-                    num_valid_indices=16,
+                X_pack0 = nl.ndarray(
+                    shape=(128, 512),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
                 )
-                for r in nl.sequential_range(16):
+                X_pack1 = nl.ndarray(
+                    shape=(128, 512),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+
+                for r in nl.affine_range(16):
                     X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                        gather_a[:, 0, r, :],
+                        X_band[:, r + 0, 0:32],
                     )
-
-                idx16[:, :] = nl.add(nl.multiply(local_row, 34), 1)
-                gather_b = nisa.local_gather(
-                    X_band,
-                    idx16,
-                    num_elem_per_idx=32,
-                    num_valid_indices=16,
-                )
-                for r in nl.sequential_range(16):
+                for r in nl.affine_range(16):
                     X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                        gather_b[:, 0, r, :],
+                        X_band[:, r + 0, 1:33],
                     )
                 psum0 += nisa.nc_matmul(w0[:, :, 0, 0], X_pack0)
                 psum1 += nisa.nc_matmul(w1[:, :, 0, 0], X_pack0)
 
-                idx16[:, :] = nl.add(nl.multiply(local_row, 34), 2)
-                gather_a = nisa.local_gather(
-                    X_band,
-                    idx16,
-                    num_elem_per_idx=32,
-                    num_valid_indices=16,
-                )
-                for r in nl.sequential_range(16):
+                for r in nl.affine_range(16):
                     X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                        gather_a[:, 0, r, :],
+                        X_band[:, r + 0, 2:34],
                     )
                 psum0 += nisa.nc_matmul(w0[:, :, 0, 1], X_pack1)
                 psum1 += nisa.nc_matmul(w1[:, :, 0, 1], X_pack1)
 
-                idx16[:, :] = nl.add(nl.multiply(local_row, 34), 34)
-                gather_b = nisa.local_gather(
-                    X_band,
-                    idx16,
-                    num_elem_per_idx=32,
-                    num_valid_indices=16,
-                )
-                for r in nl.sequential_range(16):
+                for r in nl.affine_range(16):
                     X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                        gather_b[:, 0, r, :],
+                        X_band[:, r + 1, 0:32],
                     )
                 psum0 += nisa.nc_matmul(w0[:, :, 0, 2], X_pack0)
                 psum1 += nisa.nc_matmul(w1[:, :, 0, 2], X_pack0)
 
-                idx16[:, :] = nl.add(nl.multiply(local_row, 34), 35)
-                gather_a = nisa.local_gather(
-                    X_band,
-                    idx16,
-                    num_elem_per_idx=32,
-                    num_valid_indices=16,
-                )
-                for r in nl.sequential_range(16):
+                for r in nl.affine_range(16):
                     X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                        gather_a[:, 0, r, :],
+                        X_band[:, r + 1, 1:33],
                     )
                 psum0 += nisa.nc_matmul(w0[:, :, 1, 0], X_pack1)
                 psum1 += nisa.nc_matmul(w1[:, :, 1, 0], X_pack1)
 
-                idx16[:, :] = nl.add(nl.multiply(local_row, 34), 36)
-                gather_b = nisa.local_gather(
-                    X_band,
-                    idx16,
-                    num_elem_per_idx=32,
-                    num_valid_indices=16,
-                )
-                for r in nl.sequential_range(16):
+                for r in nl.affine_range(16):
                     X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                        gather_b[:, 0, r, :],
+                        X_band[:, r + 1, 2:34],
                     )
                 psum0 += nisa.nc_matmul(w0[:, :, 1, 1], X_pack0)
                 psum1 += nisa.nc_matmul(w1[:, :, 1, 1], X_pack0)
 
-                idx16[:, :] = nl.add(nl.multiply(local_row, 34), 68)
-                gather_a = nisa.local_gather(
-                    X_band,
-                    idx16,
-                    num_elem_per_idx=32,
-                    num_valid_indices=16,
-                )
-                for r in nl.sequential_range(16):
+                for r in nl.affine_range(16):
                     X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                        gather_a[:, 0, r, :],
+                        X_band[:, r + 2, 0:32],
                     )
                 psum0 += nisa.nc_matmul(w0[:, :, 1, 2], X_pack1)
                 psum1 += nisa.nc_matmul(w1[:, :, 1, 2], X_pack1)
 
-                idx16[:, :] = nl.add(nl.multiply(local_row, 34), 69)
-                gather_b = nisa.local_gather(
-                    X_band,
-                    idx16,
-                    num_elem_per_idx=32,
-                    num_valid_indices=16,
-                )
-                for r in nl.sequential_range(16):
+                for r in nl.affine_range(16):
                     X_pack1[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                        gather_b[:, 0, r, :],
+                        X_band[:, r + 2, 1:33],
                     )
                 psum0 += nisa.nc_matmul(w0[:, :, 2, 0], X_pack0)
                 psum1 += nisa.nc_matmul(w1[:, :, 2, 0], X_pack0)
 
-                idx16[:, :] = nl.add(nl.multiply(local_row, 34), 70)
-                gather_a = nisa.local_gather(
-                    X_band,
-                    idx16,
-                    num_elem_per_idx=32,
-                    num_valid_indices=16,
-                )
-                for r in nl.sequential_range(16):
+                for r in nl.affine_range(16):
                     X_pack0[:, r * 32 : (r + 1) * 32] = nisa.tensor_copy(
-                        gather_a[:, 0, r, :],
+                        X_band[:, r + 2, 2:34],
                     )
                 psum0 += nisa.nc_matmul(w0[:, :, 2, 1], X_pack1)
                 psum1 += nisa.nc_matmul(w1[:, :, 2, 1], X_pack1)
