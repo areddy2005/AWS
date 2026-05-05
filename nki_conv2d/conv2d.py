@@ -71,7 +71,7 @@ def conv2d_nki(X, W, bias):
     )
 
     if use_fastpath:
-        # Shape-specialized 3x3 b4 34x34: w0/w1 + weak-prologue. Perf probe: gather_flattened all 9 taps, no ping-pong.
+        # Shape-specialized 3x3 b4 34x34: w0/w1 + weak-prologue. gather_flattened X_pack; 9 idx tiles prebuilt once; no ping-pong.
         X_out = nl.ndarray(
             shape=(4, 256, 32, 32),
             dtype=X.dtype,
@@ -142,6 +142,48 @@ def conv2d_nki(X, W, bias):
         bias_sbuf[:, 0] = nl.load(bias[0:128])
         bias_sbuf[:, 1] = nl.load(bias[128:256])
 
+        # Prebuild 9 gather index tiles once (flat index = (r+i)*34 + (c+j)); no idx work in block loops.
+        col_expr = nl.arange(0, 32)[None, :]
+        part_expr = nl.arange(0, 128)[:, None]
+
+        idx00 = nl.ndarray(shape=(128, 512), dtype=nl.uint32, buffer=nl.sbuf)
+        idx01 = nl.ndarray(shape=(128, 512), dtype=nl.uint32, buffer=nl.sbuf)
+        idx02 = nl.ndarray(shape=(128, 512), dtype=nl.uint32, buffer=nl.sbuf)
+        idx10 = nl.ndarray(shape=(128, 512), dtype=nl.uint32, buffer=nl.sbuf)
+        idx11 = nl.ndarray(shape=(128, 512), dtype=nl.uint32, buffer=nl.sbuf)
+        idx12 = nl.ndarray(shape=(128, 512), dtype=nl.uint32, buffer=nl.sbuf)
+        idx20 = nl.ndarray(shape=(128, 512), dtype=nl.uint32, buffer=nl.sbuf)
+        idx21 = nl.ndarray(shape=(128, 512), dtype=nl.uint32, buffer=nl.sbuf)
+        idx22 = nl.ndarray(shape=(128, 512), dtype=nl.uint32, buffer=nl.sbuf)
+
+        for r in nl.affine_range(16):
+            expr = part_expr * 0 + (r * 34 + 0 + col_expr)
+            idx00[:, r * 32 : (r + 1) * 32] = nisa.iota(expr, dtype=nl.uint32)
+        for r in nl.affine_range(16):
+            expr = part_expr * 0 + (r * 34 + 1 + col_expr)
+            idx01[:, r * 32 : (r + 1) * 32] = nisa.iota(expr, dtype=nl.uint32)
+        for r in nl.affine_range(16):
+            expr = part_expr * 0 + (r * 34 + 2 + col_expr)
+            idx02[:, r * 32 : (r + 1) * 32] = nisa.iota(expr, dtype=nl.uint32)
+        for r in nl.affine_range(16):
+            expr = part_expr * 0 + (r * 34 + 34 + col_expr)
+            idx10[:, r * 32 : (r + 1) * 32] = nisa.iota(expr, dtype=nl.uint32)
+        for r in nl.affine_range(16):
+            expr = part_expr * 0 + (r * 34 + 35 + col_expr)
+            idx11[:, r * 32 : (r + 1) * 32] = nisa.iota(expr, dtype=nl.uint32)
+        for r in nl.affine_range(16):
+            expr = part_expr * 0 + (r * 34 + 36 + col_expr)
+            idx12[:, r * 32 : (r + 1) * 32] = nisa.iota(expr, dtype=nl.uint32)
+        for r in nl.affine_range(16):
+            expr = part_expr * 0 + (r * 34 + 68 + col_expr)
+            idx20[:, r * 32 : (r + 1) * 32] = nisa.iota(expr, dtype=nl.uint32)
+        for r in nl.affine_range(16):
+            expr = part_expr * 0 + (r * 34 + 69 + col_expr)
+            idx21[:, r * 32 : (r + 1) * 32] = nisa.iota(expr, dtype=nl.uint32)
+        for r in nl.affine_range(16):
+            expr = part_expr * 0 + (r * 34 + 70 + col_expr)
+            idx22[:, r * 32 : (r + 1) * 32] = nisa.iota(expr, dtype=nl.uint32)
+
         psum0_first = nl.zeros(
             shape=(128, 512),
             dtype=nl.float32,
@@ -153,29 +195,77 @@ def conv2d_nki(X, W, bias):
             buffer=nl.psum,
         )
 
-        # Perf probe (Test B): no ping-pong; one idx tile per block; gather all 9 taps; weak-prologue unchanged.
-        idx = nl.ndarray(
-            shape=(128, 512),
-            dtype=nl.uint32,
-            buffer=nl.sbuf,
+        X_pack = nl.gather_flattened(
+            data=X_band_first,
+            indices=idx00,
+            dtype=X.dtype,
         )
-        col_expr = nl.arange(0, 32)[None, :]
-        part_expr = nl.arange(0, 128)[:, None]
-        for i in nl.affine_range(3):
-            for j in nl.affine_range(3):
-                for r in nl.affine_range(16):
-                    expr_ij = part_expr * 0 + ((r + i) * 34 + j + col_expr)
-                    idx[:, r * 32 : (r + 1) * 32] = nisa.iota(
-                        expr_ij,
-                        dtype=nl.uint32,
-                    )
-                X_pack = nl.gather_flattened(
-                    data=X_band_first,
-                    indices=idx,
-                    dtype=X.dtype,
-                )
-                psum0_first += nisa.nc_matmul(w0[:, :, i, j], X_pack)
-                psum1_first += nisa.nc_matmul(w1[:, :, i, j], X_pack)
+        psum0_first += nisa.nc_matmul(w0[:, :, 0, 0], X_pack)
+        psum1_first += nisa.nc_matmul(w1[:, :, 0, 0], X_pack)
+
+        X_pack = nl.gather_flattened(
+            data=X_band_first,
+            indices=idx01,
+            dtype=X.dtype,
+        )
+        psum0_first += nisa.nc_matmul(w0[:, :, 0, 1], X_pack)
+        psum1_first += nisa.nc_matmul(w1[:, :, 0, 1], X_pack)
+
+        X_pack = nl.gather_flattened(
+            data=X_band_first,
+            indices=idx02,
+            dtype=X.dtype,
+        )
+        psum0_first += nisa.nc_matmul(w0[:, :, 0, 2], X_pack)
+        psum1_first += nisa.nc_matmul(w1[:, :, 0, 2], X_pack)
+
+        X_pack = nl.gather_flattened(
+            data=X_band_first,
+            indices=idx10,
+            dtype=X.dtype,
+        )
+        psum0_first += nisa.nc_matmul(w0[:, :, 1, 0], X_pack)
+        psum1_first += nisa.nc_matmul(w1[:, :, 1, 0], X_pack)
+
+        X_pack = nl.gather_flattened(
+            data=X_band_first,
+            indices=idx11,
+            dtype=X.dtype,
+        )
+        psum0_first += nisa.nc_matmul(w0[:, :, 1, 1], X_pack)
+        psum1_first += nisa.nc_matmul(w1[:, :, 1, 1], X_pack)
+
+        X_pack = nl.gather_flattened(
+            data=X_band_first,
+            indices=idx12,
+            dtype=X.dtype,
+        )
+        psum0_first += nisa.nc_matmul(w0[:, :, 1, 2], X_pack)
+        psum1_first += nisa.nc_matmul(w1[:, :, 1, 2], X_pack)
+
+        X_pack = nl.gather_flattened(
+            data=X_band_first,
+            indices=idx20,
+            dtype=X.dtype,
+        )
+        psum0_first += nisa.nc_matmul(w0[:, :, 2, 0], X_pack)
+        psum1_first += nisa.nc_matmul(w1[:, :, 2, 0], X_pack)
+
+        X_pack = nl.gather_flattened(
+            data=X_band_first,
+            indices=idx21,
+            dtype=X.dtype,
+        )
+        psum0_first += nisa.nc_matmul(w0[:, :, 2, 1], X_pack)
+        psum1_first += nisa.nc_matmul(w1[:, :, 2, 1], X_pack)
+
+        X_pack = nl.gather_flattened(
+            data=X_band_first,
+            indices=idx22,
+            dtype=X.dtype,
+        )
+        psum0_first += nisa.nc_matmul(w0[:, :, 2, 2], X_pack)
+        psum1_first += nisa.nc_matmul(w1[:, :, 2, 2], X_pack)
 
         out0_first = nl.ndarray(
             shape=(128, 16, 32),
@@ -245,28 +335,77 @@ def conv2d_nki(X, W, bias):
                 buffer=nl.psum,
             )
 
-            idx = nl.ndarray(
-                shape=(128, 512),
-                dtype=nl.uint32,
-                buffer=nl.sbuf,
+            X_pack = nl.gather_flattened(
+                data=X_band,
+                indices=idx00,
+                dtype=X.dtype,
             )
-            col_expr = nl.arange(0, 32)[None, :]
-            part_expr = nl.arange(0, 128)[:, None]
-            for i in nl.affine_range(3):
-                for j in nl.affine_range(3):
-                    for r in nl.affine_range(16):
-                        expr_ij = part_expr * 0 + ((r + i) * 34 + j + col_expr)
-                        idx[:, r * 32 : (r + 1) * 32] = nisa.iota(
-                            expr_ij,
-                            dtype=nl.uint32,
-                        )
-                    X_pack = nl.gather_flattened(
-                        data=X_band,
-                        indices=idx,
-                        dtype=X.dtype,
-                    )
-                    psum0 += nisa.nc_matmul(w0[:, :, i, j], X_pack)
-                    psum1 += nisa.nc_matmul(w1[:, :, i, j], X_pack)
+            psum0 += nisa.nc_matmul(w0[:, :, 0, 0], X_pack)
+            psum1 += nisa.nc_matmul(w1[:, :, 0, 0], X_pack)
+
+            X_pack = nl.gather_flattened(
+                data=X_band,
+                indices=idx01,
+                dtype=X.dtype,
+            )
+            psum0 += nisa.nc_matmul(w0[:, :, 0, 1], X_pack)
+            psum1 += nisa.nc_matmul(w1[:, :, 0, 1], X_pack)
+
+            X_pack = nl.gather_flattened(
+                data=X_band,
+                indices=idx02,
+                dtype=X.dtype,
+            )
+            psum0 += nisa.nc_matmul(w0[:, :, 0, 2], X_pack)
+            psum1 += nisa.nc_matmul(w1[:, :, 0, 2], X_pack)
+
+            X_pack = nl.gather_flattened(
+                data=X_band,
+                indices=idx10,
+                dtype=X.dtype,
+            )
+            psum0 += nisa.nc_matmul(w0[:, :, 1, 0], X_pack)
+            psum1 += nisa.nc_matmul(w1[:, :, 1, 0], X_pack)
+
+            X_pack = nl.gather_flattened(
+                data=X_band,
+                indices=idx11,
+                dtype=X.dtype,
+            )
+            psum0 += nisa.nc_matmul(w0[:, :, 1, 1], X_pack)
+            psum1 += nisa.nc_matmul(w1[:, :, 1, 1], X_pack)
+
+            X_pack = nl.gather_flattened(
+                data=X_band,
+                indices=idx12,
+                dtype=X.dtype,
+            )
+            psum0 += nisa.nc_matmul(w0[:, :, 1, 2], X_pack)
+            psum1 += nisa.nc_matmul(w1[:, :, 1, 2], X_pack)
+
+            X_pack = nl.gather_flattened(
+                data=X_band,
+                indices=idx20,
+                dtype=X.dtype,
+            )
+            psum0 += nisa.nc_matmul(w0[:, :, 2, 0], X_pack)
+            psum1 += nisa.nc_matmul(w1[:, :, 2, 0], X_pack)
+
+            X_pack = nl.gather_flattened(
+                data=X_band,
+                indices=idx21,
+                dtype=X.dtype,
+            )
+            psum0 += nisa.nc_matmul(w0[:, :, 2, 1], X_pack)
+            psum1 += nisa.nc_matmul(w1[:, :, 2, 1], X_pack)
+
+            X_pack = nl.gather_flattened(
+                data=X_band,
+                indices=idx22,
+                dtype=X.dtype,
+            )
+            psum0 += nisa.nc_matmul(w0[:, :, 2, 2], X_pack)
+            psum1 += nisa.nc_matmul(w1[:, :, 2, 2], X_pack)
 
             out0 = nl.ndarray(
                 shape=(128, 16, 32),
@@ -337,28 +476,77 @@ def conv2d_nki(X, W, bias):
                     buffer=nl.psum,
                 )
 
-                idx = nl.ndarray(
-                    shape=(128, 512),
-                    dtype=nl.uint32,
-                    buffer=nl.sbuf,
+                X_pack = nl.gather_flattened(
+                    data=X_band,
+                    indices=idx00,
+                    dtype=X.dtype,
                 )
-                col_expr = nl.arange(0, 32)[None, :]
-                part_expr = nl.arange(0, 128)[:, None]
-                for i in nl.affine_range(3):
-                    for j in nl.affine_range(3):
-                        for r in nl.affine_range(16):
-                            expr_ij = part_expr * 0 + ((r + i) * 34 + j + col_expr)
-                            idx[:, r * 32 : (r + 1) * 32] = nisa.iota(
-                                expr_ij,
-                                dtype=nl.uint32,
-                            )
-                        X_pack = nl.gather_flattened(
-                            data=X_band,
-                            indices=idx,
-                            dtype=X.dtype,
-                        )
-                        psum0 += nisa.nc_matmul(w0[:, :, i, j], X_pack)
-                        psum1 += nisa.nc_matmul(w1[:, :, i, j], X_pack)
+                psum0 += nisa.nc_matmul(w0[:, :, 0, 0], X_pack)
+                psum1 += nisa.nc_matmul(w1[:, :, 0, 0], X_pack)
+
+                X_pack = nl.gather_flattened(
+                    data=X_band,
+                    indices=idx01,
+                    dtype=X.dtype,
+                )
+                psum0 += nisa.nc_matmul(w0[:, :, 0, 1], X_pack)
+                psum1 += nisa.nc_matmul(w1[:, :, 0, 1], X_pack)
+
+                X_pack = nl.gather_flattened(
+                    data=X_band,
+                    indices=idx02,
+                    dtype=X.dtype,
+                )
+                psum0 += nisa.nc_matmul(w0[:, :, 0, 2], X_pack)
+                psum1 += nisa.nc_matmul(w1[:, :, 0, 2], X_pack)
+
+                X_pack = nl.gather_flattened(
+                    data=X_band,
+                    indices=idx10,
+                    dtype=X.dtype,
+                )
+                psum0 += nisa.nc_matmul(w0[:, :, 1, 0], X_pack)
+                psum1 += nisa.nc_matmul(w1[:, :, 1, 0], X_pack)
+
+                X_pack = nl.gather_flattened(
+                    data=X_band,
+                    indices=idx11,
+                    dtype=X.dtype,
+                )
+                psum0 += nisa.nc_matmul(w0[:, :, 1, 1], X_pack)
+                psum1 += nisa.nc_matmul(w1[:, :, 1, 1], X_pack)
+
+                X_pack = nl.gather_flattened(
+                    data=X_band,
+                    indices=idx12,
+                    dtype=X.dtype,
+                )
+                psum0 += nisa.nc_matmul(w0[:, :, 1, 2], X_pack)
+                psum1 += nisa.nc_matmul(w1[:, :, 1, 2], X_pack)
+
+                X_pack = nl.gather_flattened(
+                    data=X_band,
+                    indices=idx20,
+                    dtype=X.dtype,
+                )
+                psum0 += nisa.nc_matmul(w0[:, :, 2, 0], X_pack)
+                psum1 += nisa.nc_matmul(w1[:, :, 2, 0], X_pack)
+
+                X_pack = nl.gather_flattened(
+                    data=X_band,
+                    indices=idx21,
+                    dtype=X.dtype,
+                )
+                psum0 += nisa.nc_matmul(w0[:, :, 2, 1], X_pack)
+                psum1 += nisa.nc_matmul(w1[:, :, 2, 1], X_pack)
+
+                X_pack = nl.gather_flattened(
+                    data=X_band,
+                    indices=idx22,
+                    dtype=X.dtype,
+                )
+                psum0 += nisa.nc_matmul(w0[:, :, 2, 2], X_pack)
+                psum1 += nisa.nc_matmul(w1[:, :, 2, 2], X_pack)
 
                 out0 = nl.ndarray(
                     shape=(128, 16, 32),
