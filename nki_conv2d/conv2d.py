@@ -900,6 +900,17 @@ def conv2d_nki(X, W, bias):
                     w[:, :, 1, 0, i, j],
                     X_packed_first_block,
                 )
+        out0_pair = nl.ndarray(
+            shape=(128, 1024),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
+        )
+        out1_pair = nl.ndarray(
+            shape=(128, 1024),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
+        )
+
         X_band = nl.ndarray(
             shape=(128, 1, 10, 66),
             dtype=X.dtype,
@@ -914,33 +925,96 @@ def conv2d_nki(X, W, bias):
             ]
         )
 
+        psum0_r1 = nl.zeros(
+            shape=(128, 512),
+            dtype=nl.float32,
+            buffer=nl.psum,
+        )
+        psum1_r1 = nl.zeros(
+            shape=(128, 512),
+            dtype=nl.float32,
+            buffer=nl.psum,
+        )
+
+        for i in nl.affine_range(3):
+            for j in nl.affine_range(3):
+                X_packed_row = nl.ndarray(
+                    shape=(128, 512),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                X_packed_row[:, :] = nisa.tensor_copy(
+                    X_band[
+                        :,
+                        0,
+                        i : i + 8,
+                        j : j + 64,
+                    ]
+                ).reshape((128, 512))
+                psum0_r1 += nisa.nc_matmul(
+                    w[:, :, 0, 0, i, j],
+                    X_packed_row,
+                )
+                psum1_r1 += nisa.nc_matmul(
+                    w[:, :, 1, 0, i, j],
+                    X_packed_row,
+                )
+
+        out0_pair[:, 0:512] = nisa.tensor_scalar(
+            psum0_first[:, :],
+            op0=np.add,
+            operand0=bias_sbuf[:, 0:1],
+            dtype=X.dtype,
+        )
+        out1_pair[:, 0:512] = nisa.tensor_scalar(
+            psum1_first[:, :],
+            op0=np.add,
+            operand0=bias_sbuf[:, 1:2],
+            dtype=X.dtype,
+        )
+        out0_pair[:, 512:1024] = nisa.tensor_scalar(
+            psum0_r1[:, :],
+            op0=np.add,
+            operand0=bias_sbuf[:, 0:1],
+            dtype=X.dtype,
+        )
+        out1_pair[:, 512:1024] = nisa.tensor_scalar(
+            psum1_r1[:, :],
+            op0=np.add,
+            operand0=bias_sbuf[:, 1:2],
+            dtype=X.dtype,
+        )
+
         nl.store(
             X_out[
                 0,
                 0:128,
-                0:8,
+                0:16,
                 0:64,
             ],
-            nl.add(
-                psum0_first,
-                bias_sbuf[:, 0],
-            ).reshape((128, 8, 64)),
+            out0_pair.reshape((128, 16, 64)),
         )
         nl.store(
             X_out[
                 0,
                 128:256,
-                0:8,
+                0:16,
                 0:64,
             ],
-            nl.add(
-                psum1_first,
-                bias_sbuf[:, 1],
-            ).reshape((128, 8, 64)),
+            out1_pair.reshape((128, 16, 64)),
         )
 
-        for row_block in nl.sequential_range(1, 7):
-            row_start = row_block * 8
+        X_band[:, 0, :, :] = nl.load(
+            X[
+                0,
+                0:128,
+                16:26,
+                0:66,
+            ]
+        )
+
+        for pair_idx in nl.sequential_range(1, 4):
+            pair_row_start = pair_idx * 16
 
             psum0_row = nl.zeros(
                 shape=(128, 512),
@@ -977,7 +1051,8 @@ def conv2d_nki(X, W, bias):
                         X_packed_row,
                     )
 
-            next_row_start = (row_block + 1) * 8
+            rb_odd = pair_idx * 2 + 1
+            next_row_start = rb_odd * 8
             X_band[:, 0, :, :] = nl.load(
                 X[
                     0,
@@ -987,94 +1062,109 @@ def conv2d_nki(X, W, bias):
                 ]
             )
 
+            psum0_r_odd = nl.zeros(
+                shape=(128, 512),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
+            psum1_r_odd = nl.zeros(
+                shape=(128, 512),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
+
+            for i in nl.affine_range(3):
+                for j in nl.affine_range(3):
+                    X_packed_row = nl.ndarray(
+                        shape=(128, 512),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    X_packed_row[:, :] = nisa.tensor_copy(
+                        X_band[
+                            :,
+                            0,
+                            i : i + 8,
+                            j : j + 64,
+                        ]
+                    ).reshape((128, 512))
+                    psum0_r_odd += nisa.nc_matmul(
+                        w[:, :, 0, 0, i, j],
+                        X_packed_row,
+                    )
+                    psum1_r_odd += nisa.nc_matmul(
+                        w[:, :, 1, 0, i, j],
+                        X_packed_row,
+                    )
+
+            out0_pair[:, 0:512] = nisa.tensor_scalar(
+                psum0_row[:, :],
+                op0=np.add,
+                operand0=bias_sbuf[:, 0:1],
+                dtype=X.dtype,
+            )
+            out1_pair[:, 0:512] = nisa.tensor_scalar(
+                psum1_row[:, :],
+                op0=np.add,
+                operand0=bias_sbuf[:, 1:2],
+                dtype=X.dtype,
+            )
+            out0_pair[:, 512:1024] = nisa.tensor_scalar(
+                psum0_r_odd[:, :],
+                op0=np.add,
+                operand0=bias_sbuf[:, 0:1],
+                dtype=X.dtype,
+            )
+            out1_pair[:, 512:1024] = nisa.tensor_scalar(
+                psum1_r_odd[:, :],
+                op0=np.add,
+                operand0=bias_sbuf[:, 1:2],
+                dtype=X.dtype,
+            )
+
             nl.store(
                 X_out[
                     0,
                     0:128,
-                    row_start : row_start + 8,
+                    pair_row_start : pair_row_start + 16,
                     0:64,
                 ],
-                nl.add(
-                    psum0_row,
-                    bias_sbuf[:, 0],
-                ).reshape((128, 8, 64)),
+                out0_pair.reshape((128, 16, 64)),
             )
             nl.store(
                 X_out[
                     0,
                     128:256,
-                    row_start : row_start + 8,
+                    pair_row_start : pair_row_start + 16,
                     0:64,
                 ],
-                nl.add(
-                    psum1_row,
-                    bias_sbuf[:, 1],
-                ).reshape((128, 8, 64)),
+                out1_pair.reshape((128, 16, 64)),
             )
 
-        row_start = 56
-
-        psum0_row = nl.zeros(
-            shape=(128, 512),
-            dtype=nl.float32,
-            buffer=nl.psum,
-        )
-        psum1_row = nl.zeros(
-            shape=(128, 512),
-            dtype=nl.float32,
-            buffer=nl.psum,
-        )
-
-        for i in nl.affine_range(3):
-            for j in nl.affine_range(3):
-                X_packed_row = nl.ndarray(
-                    shape=(128, 512),
-                    dtype=X.dtype,
-                    buffer=nl.sbuf,
-                )
-                X_packed_row[:, :] = nisa.tensor_copy(
-                    X_band[
-                        :,
+            if pair_idx < 3:
+                next_pair_first_rb = (pair_idx + 1) * 2
+                next_row_start = next_pair_first_rb * 8
+                X_band[:, 0, :, :] = nl.load(
+                    X[
                         0,
-                        i : i + 8,
-                        j : j + 64,
+                        0:128,
+                        next_row_start : next_row_start + 10,
+                        0:66,
                     ]
-                ).reshape((128, 512))
-                psum0_row += nisa.nc_matmul(
-                    w[:, :, 0, 0, i, j],
-                    X_packed_row,
                 )
-                psum1_row += nisa.nc_matmul(
-                    w[:, :, 1, 0, i, j],
-                    X_packed_row,
-                )
-
-        nl.store(
-            X_out[
-                0,
-                0:128,
-                row_start : row_start + 8,
-                0:64,
-            ],
-            nl.add(
-                psum0_row,
-                bias_sbuf[:, 0],
-            ).reshape((128, 8, 64)),
-        )
-        nl.store(
-            X_out[
-                0,
-                128:256,
-                row_start : row_start + 8,
-                0:64,
-            ],
-            nl.add(
-                psum1_row,
-                bias_sbuf[:, 1],
-            ).reshape((128, 8, 64)),
-        )
 
         for img in nl.sequential_range(1, 4):
+            out0_pair = nl.ndarray(
+                shape=(128, 1024),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
+            out1_pair = nl.ndarray(
+                shape=(128, 1024),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
+
             X_band = nl.ndarray(
                 shape=(128, 1, 10, 66),
                 dtype=X.dtype,
@@ -1089,15 +1179,147 @@ def conv2d_nki(X, W, bias):
                 ]
             )
 
-            for row_block in nl.sequential_range(0, 7):
-                row_start = row_block * 8
+            psum0_r0 = nl.zeros(
+                shape=(128, 512),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
+            psum1_r0 = nl.zeros(
+                shape=(128, 512),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
 
-                psum0_img = nl.zeros(
+            for i in nl.affine_range(3):
+                for j in nl.affine_range(3):
+                    X_packed_row = nl.ndarray(
+                        shape=(128, 512),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    X_packed_row[:, :] = nisa.tensor_copy(
+                        X_band[
+                            :,
+                            0,
+                            i : i + 8,
+                            j : j + 64,
+                        ]
+                    ).reshape((128, 512))
+                    psum0_r0 += nisa.nc_matmul(
+                        w[:, :, 0, 0, i, j],
+                        X_packed_row,
+                    )
+                    psum1_r0 += nisa.nc_matmul(
+                        w[:, :, 1, 0, i, j],
+                        X_packed_row,
+                    )
+
+            X_band[:, 0, :, :] = nl.load(
+                X[
+                    img,
+                    0:128,
+                    8:18,
+                    0:66,
+                ]
+            )
+
+            psum0_r1 = nl.zeros(
+                shape=(128, 512),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
+            psum1_r1 = nl.zeros(
+                shape=(128, 512),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
+
+            for i in nl.affine_range(3):
+                for j in nl.affine_range(3):
+                    X_packed_row = nl.ndarray(
+                        shape=(128, 512),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    X_packed_row[:, :] = nisa.tensor_copy(
+                        X_band[
+                            :,
+                            0,
+                            i : i + 8,
+                            j : j + 64,
+                        ]
+                    ).reshape((128, 512))
+                    psum0_r1 += nisa.nc_matmul(
+                        w[:, :, 0, 0, i, j],
+                        X_packed_row,
+                    )
+                    psum1_r1 += nisa.nc_matmul(
+                        w[:, :, 1, 0, i, j],
+                        X_packed_row,
+                    )
+
+            out0_pair[:, 0:512] = nisa.tensor_scalar(
+                psum0_r0[:, :],
+                op0=np.add,
+                operand0=bias_sbuf[:, 0:1],
+                dtype=X.dtype,
+            )
+            out1_pair[:, 0:512] = nisa.tensor_scalar(
+                psum1_r0[:, :],
+                op0=np.add,
+                operand0=bias_sbuf[:, 1:2],
+                dtype=X.dtype,
+            )
+            out0_pair[:, 512:1024] = nisa.tensor_scalar(
+                psum0_r1[:, :],
+                op0=np.add,
+                operand0=bias_sbuf[:, 0:1],
+                dtype=X.dtype,
+            )
+            out1_pair[:, 512:1024] = nisa.tensor_scalar(
+                psum1_r1[:, :],
+                op0=np.add,
+                operand0=bias_sbuf[:, 1:2],
+                dtype=X.dtype,
+            )
+
+            nl.store(
+                X_out[
+                    img,
+                    0:128,
+                    0:16,
+                    0:64,
+                ],
+                out0_pair.reshape((128, 16, 64)),
+            )
+            nl.store(
+                X_out[
+                    img,
+                    128:256,
+                    0:16,
+                    0:64,
+                ],
+                out1_pair.reshape((128, 16, 64)),
+            )
+
+            X_band[:, 0, :, :] = nl.load(
+                X[
+                    img,
+                    0:128,
+                    16:26,
+                    0:66,
+                ]
+            )
+
+            for pair_idx in nl.sequential_range(1, 4):
+                pair_row_start = pair_idx * 16
+
+                psum0_row = nl.zeros(
                     shape=(128, 512),
                     dtype=nl.float32,
                     buffer=nl.psum,
                 )
-                psum1_img = nl.zeros(
+                psum1_row = nl.zeros(
                     shape=(128, 512),
                     dtype=nl.float32,
                     buffer=nl.psum,
@@ -1105,12 +1327,12 @@ def conv2d_nki(X, W, bias):
 
                 for i in nl.affine_range(3):
                     for j in nl.affine_range(3):
-                        X_packed_img = nl.ndarray(
+                        X_packed_row = nl.ndarray(
                             shape=(128, 512),
                             dtype=X.dtype,
                             buffer=nl.sbuf,
                         )
-                        X_packed_img[:, :] = nisa.tensor_copy(
+                        X_packed_row[:, :] = nisa.tensor_copy(
                             X_band[
                                 :,
                                 0,
@@ -1118,16 +1340,17 @@ def conv2d_nki(X, W, bias):
                                 j : j + 64,
                             ]
                         ).reshape((128, 512))
-                        psum0_img += nisa.nc_matmul(
+                        psum0_row += nisa.nc_matmul(
                             w[:, :, 0, 0, i, j],
-                            X_packed_img,
+                            X_packed_row,
                         )
-                        psum1_img += nisa.nc_matmul(
+                        psum1_row += nisa.nc_matmul(
                             w[:, :, 1, 0, i, j],
-                            X_packed_img,
+                            X_packed_row,
                         )
 
-                next_row_start = (row_block + 1) * 8
+                rb_odd = pair_idx * 2 + 1
+                next_row_start = rb_odd * 8
                 X_band[:, 0, :, :] = nl.load(
                     X[
                         img,
@@ -1137,92 +1360,96 @@ def conv2d_nki(X, W, bias):
                     ]
                 )
 
+                psum0_r_odd = nl.zeros(
+                    shape=(128, 512),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+                psum1_r_odd = nl.zeros(
+                    shape=(128, 512),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+
+                for i in nl.affine_range(3):
+                    for j in nl.affine_range(3):
+                        X_packed_row = nl.ndarray(
+                            shape=(128, 512),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        X_packed_row[:, :] = nisa.tensor_copy(
+                            X_band[
+                                :,
+                                0,
+                                i : i + 8,
+                                j : j + 64,
+                            ]
+                        ).reshape((128, 512))
+                        psum0_r_odd += nisa.nc_matmul(
+                            w[:, :, 0, 0, i, j],
+                            X_packed_row,
+                        )
+                        psum1_r_odd += nisa.nc_matmul(
+                            w[:, :, 1, 0, i, j],
+                            X_packed_row,
+                        )
+
+                out0_pair[:, 0:512] = nisa.tensor_scalar(
+                    psum0_row[:, :],
+                    op0=np.add,
+                    operand0=bias_sbuf[:, 0:1],
+                    dtype=X.dtype,
+                )
+                out1_pair[:, 0:512] = nisa.tensor_scalar(
+                    psum1_row[:, :],
+                    op0=np.add,
+                    operand0=bias_sbuf[:, 1:2],
+                    dtype=X.dtype,
+                )
+                out0_pair[:, 512:1024] = nisa.tensor_scalar(
+                    psum0_r_odd[:, :],
+                    op0=np.add,
+                    operand0=bias_sbuf[:, 0:1],
+                    dtype=X.dtype,
+                )
+                out1_pair[:, 512:1024] = nisa.tensor_scalar(
+                    psum1_r_odd[:, :],
+                    op0=np.add,
+                    operand0=bias_sbuf[:, 1:2],
+                    dtype=X.dtype,
+                )
+
                 nl.store(
                     X_out[
                         img,
                         0:128,
-                        row_start : row_start + 8,
+                        pair_row_start : pair_row_start + 16,
                         0:64,
                     ],
-                    nl.add(
-                        psum0_img,
-                        bias_sbuf[:, 0],
-                    ).reshape((128, 8, 64)),
+                    out0_pair.reshape((128, 16, 64)),
                 )
                 nl.store(
                     X_out[
                         img,
                         128:256,
-                        row_start : row_start + 8,
+                        pair_row_start : pair_row_start + 16,
                         0:64,
                     ],
-                    nl.add(
-                        psum1_img,
-                        bias_sbuf[:, 1],
-                    ).reshape((128, 8, 64)),
+                    out1_pair.reshape((128, 16, 64)),
                 )
 
-            row_start = 56
-
-            psum0_img = nl.zeros(
-                shape=(128, 512),
-                dtype=nl.float32,
-                buffer=nl.psum,
-            )
-            psum1_img = nl.zeros(
-                shape=(128, 512),
-                dtype=nl.float32,
-                buffer=nl.psum,
-            )
-
-            for i in nl.affine_range(3):
-                for j in nl.affine_range(3):
-                    X_packed_img = nl.ndarray(
-                        shape=(128, 512),
-                        dtype=X.dtype,
-                        buffer=nl.sbuf,
-                    )
-                    X_packed_img[:, :] = nisa.tensor_copy(
-                        X_band[
-                            :,
-                            0,
-                            i : i + 8,
-                            j : j + 64,
+                if pair_idx < 3:
+                    next_pair_first_rb = (pair_idx + 1) * 2
+                    next_row_start = next_pair_first_rb * 8
+                    X_band[:, 0, :, :] = nl.load(
+                        X[
+                            img,
+                            0:128,
+                            next_row_start : next_row_start + 10,
+                            0:66,
                         ]
-                    ).reshape((128, 512))
-                    psum0_img += nisa.nc_matmul(
-                        w[:, :, 0, 0, i, j],
-                        X_packed_img,
                     )
-                    psum1_img += nisa.nc_matmul(
-                        w[:, :, 1, 0, i, j],
-                        X_packed_img,
-                    )
-
-            nl.store(
-                X_out[
-                    img,
-                    0:128,
-                    row_start : row_start + 8,
-                    0:64,
-                ],
-                nl.add(
-                    psum0_img,
-                    bias_sbuf[:, 0],
-                ).reshape((128, 8, 64)),
-            )
-            nl.store(
-                X_out[
-                    img,
-                    128:256,
-                    row_start : row_start + 8,
-                    0:64,
-                ],
-                nl.add(
-                    psum1_img,
-                    bias_sbuf[:, 1],
-                ).reshape((128, 8, 64)),
-            )
 
         return X_out
 
