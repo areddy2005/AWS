@@ -90,6 +90,16 @@ def conv2d_nki(X, W, bias):
         and X.dtype == nl.float16
     )
 
+    use_fastpath_in256_out256_3x3_b16_34x34_fp16 = (
+        batch_size == 16
+        and in_channels == 256
+        and out_channels == 256
+        and input_height == 34
+        and input_width == 34
+        and K == 3
+        and X.dtype == nl.float16
+    )
+
     """use_fastpath_in256_out256_3x3_b4 = (
         batch_size == 4
         and in_channels == 256
@@ -99,6 +109,622 @@ def conv2d_nki(X, W, bias):
         and K == 3
         and X.dtype == nl.float32
     )"""
+
+    if use_fastpath_in256_out256_3x3_b16_34x34_fp16:
+        # Tiling dimensions
+        c_in_tile = nl.tile_size.pmax                       # partition dim = 128
+        c_out_tile = nl.tile_size.gemm_stationary_fmax      # tensor engine free dim = 128
+        n_tiles_c_in = in_channels // c_in_tile
+        n_tiles_c_out = out_channels // c_out_tile
+
+        # Block of output rows per spatial iteration. Sized so the packed matmul
+        # free dim block_rows * out_width hits the Tensor Engine maximum (~512),
+        # giving 100% matmul utilization instead of out_width / 512.
+        MAX_F_M = 512
+        if out_width <= MAX_F_M and (MAX_F_M % out_width == 0):
+            candidate = MAX_F_M // out_width
+            # Shrink if it does not evenly tile out_height
+            while candidate > 1 and out_height % candidate != 0:
+                candidate //= 2
+            block_rows = candidate
+        else:
+            block_rows = 1
+        n_row_blocks = out_height // block_rows
+        F_m = block_rows * out_width   # packed matmul free dimension
+
+        # Chunked HBM stores for out256 path (epilogue only); requires block_rows % CHUNK_ROWS == 0.
+        CHUNK_ROWS = 4
+
+        # Output tensor in HBM
+        X_out = nl.ndarray(
+            shape=(batch_size, out_channels, out_height, out_width),
+            dtype=X.dtype,
+            buffer=nl.hbm,
+        )
+
+        X_bands_first = nl.ndarray(
+            shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
+        )
+        for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+            X_bands_first[:, c_in_tile_idx, :, :] = nl.load(
+                X[
+                    0,
+                    c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                    0 : block_rows + K - 1,
+                    0 : out_width + K - 1,
+                ]
+            )
+
+        # Stage weights: one contiguous nl.load per (c_out,c_in) slab + nc_transpose per tap.
+        w = nl.ndarray(
+            shape=(c_in_tile, c_out_tile, n_tiles_c_out, n_tiles_c_in, filter_height, filter_width),
+            dtype=W.dtype,
+            buffer=nl.sbuf,
+        )
+        for c_out_tile_idx in nl.affine_range(n_tiles_c_out):
+            for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                W_slab = nl.ndarray(
+                    shape=(c_out_tile, c_in_tile, K, K),
+                    dtype=W.dtype,
+                    buffer=nl.sbuf,
+                )
+                W_slab[:, :, :, :] = nl.load(
+                    W[c_out_tile_idx * c_out_tile : (c_out_tile_idx + 1) * c_out_tile,
+                      c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                      0:K,
+                      0:K]
+                )
+                for wi in nl.affine_range(K):
+                    for wj in nl.affine_range(K):
+                        w[:, :, c_out_tile_idx, c_in_tile_idx, wi, wj] = nisa.nc_transpose(
+                            W_slab[:, :, wi, wj]
+                        )
+
+        bias_sbuf = nl.ndarray(
+            shape=(c_out_tile, n_tiles_c_out),
+            dtype=bias.dtype,
+            buffer=nl.sbuf,
+        )
+        for c_out_idx in nl.affine_range(n_tiles_c_out):
+            bias_sbuf[:, c_out_idx] = nl.load(
+                bias[c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile]
+            )
+
+        # First spatial block (img=0, row_block=0): prefetched X_bands_first overlaps weight/bias staging.
+        row_start = 0
+        if n_tiles_c_out == 2:
+            psum0_first = nl.zeros(
+                shape=(c_out_tile, F_m),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
+            psum1_first = nl.zeros(
+                shape=(c_out_tile, F_m),
+                dtype=nl.float32,
+                buffer=nl.psum,
+            )
+
+            for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                for i in nl.affine_range(K):
+                    for j in nl.affine_range(K):
+                        X_packed_first_block = nl.ndarray(
+                            shape=(c_in_tile, F_m),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for r in nl.affine_range(block_rows):
+                            X_packed_first_block[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                X_bands_first[:, c_in_tile_idx, r + i, j : j + out_width],
+                            )
+                        psum0_first += nisa.nc_matmul(
+                            w[:, :, 0, c_in_tile_idx, i, j],
+                            X_packed_first_block,
+                        )
+                        psum1_first += nisa.nc_matmul(
+                            w[:, :, 1, c_in_tile_idx, i, j],
+                            X_packed_first_block,
+                        )
+
+            if block_rows % CHUNK_ROWS == 0:
+                for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                    out_chunk0_first = nl.ndarray(
+                        shape=(c_out_tile, CHUNK_ROWS, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for cr in nl.affine_range(CHUNK_ROWS):
+                        r = rr * CHUNK_ROWS + cr
+                        out_chunk0_first[:, cr, :] = nl.add(
+                            psum0_first[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, 0],
+                        )
+                    nl.store(
+                        X_out[
+                            0,
+                            0 * c_out_tile : 1 * c_out_tile,
+                            rr * CHUNK_ROWS : (rr + 1) * CHUNK_ROWS,
+                            :,
+                        ],
+                        out_chunk0_first,
+                    )
+
+                for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                    out_chunk1_first = nl.ndarray(
+                        shape=(c_out_tile, CHUNK_ROWS, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for cr in nl.affine_range(CHUNK_ROWS):
+                        r = rr * CHUNK_ROWS + cr
+                        out_chunk1_first[:, cr, :] = nl.add(
+                            psum1_first[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, 1],
+                        )
+                    nl.store(
+                        X_out[
+                            0,
+                            1 * c_out_tile : 2 * c_out_tile,
+                            rr * CHUNK_ROWS : (rr + 1) * CHUNK_ROWS,
+                            :,
+                        ],
+                        out_chunk1_first,
+                    )
+            else:
+                out_buf0_first = nl.ndarray(
+                    shape=(c_out_tile, block_rows, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for r in nl.affine_range(block_rows):
+                    out_buf0_first[:, r, :] = nl.add(
+                        psum0_first[:, r * out_width : (r + 1) * out_width],
+                        bias_sbuf[:, 0],
+                    )
+                nl.store(
+                    X_out[
+                        0,
+                        0 * c_out_tile : 1 * c_out_tile,
+                        0 : block_rows,
+                        :,
+                    ],
+                    out_buf0_first,
+                )
+
+                out_buf1_first = nl.ndarray(
+                    shape=(c_out_tile, block_rows, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for r in nl.affine_range(block_rows):
+                    out_buf1_first[:, r, :] = nl.add(
+                        psum1_first[:, r * out_width : (r + 1) * out_width],
+                        bias_sbuf[:, 1],
+                    )
+                nl.store(
+                    X_out[
+                        0,
+                        1 * c_out_tile : 2 * c_out_tile,
+                        0 : block_rows,
+                        :,
+                    ],
+                    out_buf1_first,
+                )
+
+        else:
+            for c_out_idx in nl.affine_range(n_tiles_c_out):
+                psum_packed_first = nl.zeros(
+                    shape=(c_out_tile, F_m),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+
+                for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                    for i in nl.affine_range(K):
+                        for j in nl.affine_range(K):
+                            X_packed_first_block = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed_first_block[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands_first[:, c_in_tile_idx, r + i, j : j + out_width],
+                                )
+                            psum_packed_first += nisa.nc_matmul(
+                                w[:, :, c_out_idx, c_in_tile_idx, i, j],
+                                X_packed_first_block,
+                            )
+
+                out_buf_first = nl.ndarray(
+                    shape=(c_out_tile, block_rows, out_width),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+                for r in nl.affine_range(block_rows):
+                    out_buf_first[:, r, :] = nl.add(
+                        psum_packed_first[:, r * out_width : (r + 1) * out_width],
+                        bias_sbuf[:, c_out_idx],
+                    )
+                nl.store(
+                    X_out[
+                        0,
+                        c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
+                        0 : block_rows,
+                        :,
+                    ],
+                    out_buf_first,
+                )
+
+        # Remaining row blocks for img=0 (sequential_range(1, n_row_blocks) is empty if n_row_blocks==1)
+        for row_block in nl.sequential_range(1, n_row_blocks):
+            row_start = row_block * block_rows
+
+            X_bands = nl.ndarray(
+                shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
+                dtype=X.dtype,
+                buffer=nl.sbuf,
+            )
+
+            for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                X_bands[:, c_in_tile_idx, :, :] = nl.load(
+                    X[
+                        0,
+                        c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                        row_start : row_start + block_rows + K - 1,
+                        0 : out_width + K - 1,
+                    ]
+                )
+
+            if n_tiles_c_out == 2:
+                psum0_row = nl.zeros(
+                    shape=(c_out_tile, F_m),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+                psum1_row = nl.zeros(
+                    shape=(c_out_tile, F_m),
+                    dtype=nl.float32,
+                    buffer=nl.psum,
+                )
+
+                for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                    for i in nl.affine_range(K):
+                        for j in nl.affine_range(K):
+                            X_packed_row = nl.ndarray(
+                                shape=(c_in_tile, F_m),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for r in nl.affine_range(block_rows):
+                                X_packed_row[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                    X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                )
+                            psum0_row += nisa.nc_matmul(
+                                w[:, :, 0, c_in_tile_idx, i, j],
+                                X_packed_row,
+                            )
+                            psum1_row += nisa.nc_matmul(
+                                w[:, :, 1, c_in_tile_idx, i, j],
+                                X_packed_row,
+                            )
+
+                if block_rows % CHUNK_ROWS == 0:
+                    for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                        out_chunk0_row = nl.ndarray(
+                            shape=(c_out_tile, CHUNK_ROWS, out_width),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for cr in nl.affine_range(CHUNK_ROWS):
+                            r = rr * CHUNK_ROWS + cr
+                            out_chunk0_row[:, cr, :] = nl.add(
+                                psum0_row[:, r * out_width : (r + 1) * out_width],
+                                bias_sbuf[:, 0],
+                            )
+                        nl.store(
+                            X_out[
+                                0,
+                                0 * c_out_tile : 1 * c_out_tile,
+                                row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
+                                :,
+                            ],
+                            out_chunk0_row,
+                        )
+
+                    for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                        out_chunk1_row = nl.ndarray(
+                            shape=(c_out_tile, CHUNK_ROWS, out_width),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for cr in nl.affine_range(CHUNK_ROWS):
+                            r = rr * CHUNK_ROWS + cr
+                            out_chunk1_row[:, cr, :] = nl.add(
+                                psum1_row[:, r * out_width : (r + 1) * out_width],
+                                bias_sbuf[:, 1],
+                            )
+                        nl.store(
+                            X_out[
+                                0,
+                                1 * c_out_tile : 2 * c_out_tile,
+                                row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
+                                :,
+                            ],
+                            out_chunk1_row,
+                        )
+                else:
+                    out_buf0_row = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        out_buf0_row[:, r, :] = nl.add(
+                            psum0_row[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, 0],
+                        )
+                    nl.store(
+                        X_out[
+                            0,
+                            0 * c_out_tile : 1 * c_out_tile,
+                            row_start : row_start + block_rows,
+                            :,
+                        ],
+                        out_buf0_row,
+                    )
+
+                    out_buf1_row = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        out_buf1_row[:, r, :] = nl.add(
+                            psum1_row[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, 1],
+                        )
+                    nl.store(
+                        X_out[
+                            0,
+                            1 * c_out_tile : 2 * c_out_tile,
+                            row_start : row_start + block_rows,
+                            :,
+                        ],
+                        out_buf1_row,
+                    )
+
+            else:
+                for c_out_idx in nl.affine_range(n_tiles_c_out):
+                    psum_packed_row = nl.zeros(
+                        shape=(c_out_tile, F_m),
+                        dtype=nl.float32,
+                        buffer=nl.psum,
+                    )
+
+                    for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                        for i in nl.affine_range(K):
+                            for j in nl.affine_range(K):
+                                X_packed_row = nl.ndarray(
+                                    shape=(c_in_tile, F_m),
+                                    dtype=X.dtype,
+                                    buffer=nl.sbuf,
+                                )
+                                for r in nl.affine_range(block_rows):
+                                    X_packed_row[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                        X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                    )
+                                psum_packed_row += nisa.nc_matmul(
+                                    w[:, :, c_out_idx, c_in_tile_idx, i, j],
+                                    X_packed_row,
+                                )
+
+                    out_buf_row = nl.ndarray(
+                        shape=(c_out_tile, block_rows, out_width),
+                        dtype=X.dtype,
+                        buffer=nl.sbuf,
+                    )
+                    for r in nl.affine_range(block_rows):
+                        out_buf_row[:, r, :] = nl.add(
+                            psum_packed_row[:, r * out_width : (r + 1) * out_width],
+                            bias_sbuf[:, c_out_idx],
+                        )
+                    nl.store(
+                        X_out[
+                            0,
+                            c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
+                            row_start : row_start + block_rows,
+                            :,
+                        ],
+                        out_buf_row,
+                    )
+
+        # All row blocks for img >= 1 (outer loop empty if batch_size==1)
+        for img in nl.sequential_range(1, batch_size):
+            for row_block in nl.sequential_range(n_row_blocks):
+                row_start = row_block * block_rows
+
+                X_bands = nl.ndarray(
+                    shape=(c_in_tile, n_tiles_c_in, block_rows + K - 1, out_width + K - 1),
+                    dtype=X.dtype,
+                    buffer=nl.sbuf,
+                )
+
+                for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                    X_bands[:, c_in_tile_idx, :, :] = nl.load(
+                        X[
+                            img,
+                            c_in_tile_idx * c_in_tile : (c_in_tile_idx + 1) * c_in_tile,
+                            row_start : row_start + block_rows + K - 1,
+                            0 : out_width + K - 1,
+                        ]
+                    )
+
+                if n_tiles_c_out == 2:
+                    psum0_img = nl.zeros(
+                        shape=(c_out_tile, F_m),
+                        dtype=nl.float32,
+                        buffer=nl.psum,
+                    )
+                    psum1_img = nl.zeros(
+                        shape=(c_out_tile, F_m),
+                        dtype=nl.float32,
+                        buffer=nl.psum,
+                    )
+
+                    for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                        for i in nl.affine_range(K):
+                            for j in nl.affine_range(K):
+                                X_packed_img = nl.ndarray(
+                                    shape=(c_in_tile, F_m),
+                                    dtype=X.dtype,
+                                    buffer=nl.sbuf,
+                                )
+                                for r in nl.affine_range(block_rows):
+                                    X_packed_img[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                        X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                    )
+                                psum0_img += nisa.nc_matmul(
+                                    w[:, :, 0, c_in_tile_idx, i, j],
+                                    X_packed_img,
+                                )
+                                psum1_img += nisa.nc_matmul(
+                                    w[:, :, 1, c_in_tile_idx, i, j],
+                                    X_packed_img,
+                                )
+
+                    if block_rows % CHUNK_ROWS == 0:
+                        for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                            out_chunk0_img = nl.ndarray(
+                                shape=(c_out_tile, CHUNK_ROWS, out_width),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for cr in nl.affine_range(CHUNK_ROWS):
+                                r = rr * CHUNK_ROWS + cr
+                                out_chunk0_img[:, cr, :] = nl.add(
+                                    psum0_img[:, r * out_width : (r + 1) * out_width],
+                                    bias_sbuf[:, 0],
+                                )
+                            nl.store(
+                                X_out[
+                                    img,
+                                    0 * c_out_tile : 1 * c_out_tile,
+                                    row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
+                                    :,
+                                ],
+                                out_chunk0_img,
+                            )
+
+                        for rr in nl.affine_range(block_rows // CHUNK_ROWS):
+                            out_chunk1_img = nl.ndarray(
+                                shape=(c_out_tile, CHUNK_ROWS, out_width),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            for cr in nl.affine_range(CHUNK_ROWS):
+                                r = rr * CHUNK_ROWS + cr
+                                out_chunk1_img[:, cr, :] = nl.add(
+                                    psum1_img[:, r * out_width : (r + 1) * out_width],
+                                    bias_sbuf[:, 1],
+                                )
+                            nl.store(
+                                X_out[
+                                    img,
+                                    1 * c_out_tile : 2 * c_out_tile,
+                                    row_start + rr * CHUNK_ROWS : row_start + (rr + 1) * CHUNK_ROWS,
+                                    :,
+                                ],
+                                out_chunk1_img,
+                            )
+                    else:
+                        out_buf0_img = nl.ndarray(
+                            shape=(c_out_tile, block_rows, out_width),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for r in nl.affine_range(block_rows):
+                            out_buf0_img[:, r, :] = nl.add(
+                                psum0_img[:, r * out_width : (r + 1) * out_width],
+                                bias_sbuf[:, 0],
+                            )
+                        nl.store(
+                            X_out[
+                                img,
+                                0 * c_out_tile : 1 * c_out_tile,
+                                row_start : row_start + block_rows,
+                                :,
+                            ],
+                            out_buf0_img,
+                        )
+
+                        out_buf1_img = nl.ndarray(
+                            shape=(c_out_tile, block_rows, out_width),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for r in nl.affine_range(block_rows):
+                            out_buf1_img[:, r, :] = nl.add(
+                                psum1_img[:, r * out_width : (r + 1) * out_width],
+                                bias_sbuf[:, 1],
+                            )
+                        nl.store(
+                            X_out[
+                                img,
+                                1 * c_out_tile : 2 * c_out_tile,
+                                row_start : row_start + block_rows,
+                                :,
+                            ],
+                            out_buf1_img,
+                        )
+
+                else:
+                    for c_out_idx in nl.affine_range(n_tiles_c_out):
+                        psum_packed_img = nl.zeros(
+                            shape=(c_out_tile, F_m),
+                            dtype=nl.float32,
+                            buffer=nl.psum,
+                        )
+
+                        for c_in_tile_idx in nl.affine_range(n_tiles_c_in):
+                            for i in nl.affine_range(K):
+                                for j in nl.affine_range(K):
+                                    X_packed_img = nl.ndarray(
+                                        shape=(c_in_tile, F_m),
+                                        dtype=X.dtype,
+                                        buffer=nl.sbuf,
+                                    )
+                                    for r in nl.affine_range(block_rows):
+                                        X_packed_img[:, r * out_width : (r + 1) * out_width] = nisa.tensor_copy(
+                                            X_bands[:, c_in_tile_idx, r + i, j : j + out_width],
+                                        )
+                                    psum_packed_img += nisa.nc_matmul(
+                                        w[:, :, c_out_idx, c_in_tile_idx, i, j],
+                                        X_packed_img,
+                                    )
+
+                        out_buf_img = nl.ndarray(
+                            shape=(c_out_tile, block_rows, out_width),
+                            dtype=X.dtype,
+                            buffer=nl.sbuf,
+                        )
+                        for r in nl.affine_range(block_rows):
+                            out_buf_img[:, r, :] = nl.add(
+                                psum_packed_img[:, r * out_width : (r + 1) * out_width],
+                                bias_sbuf[:, c_out_idx],
+                            )
+                        nl.store(
+                            X_out[
+                                img,
+                                c_out_idx * c_out_tile : (c_out_idx + 1) * c_out_tile,
+                                row_start : row_start + block_rows,
+                                :,
+                            ],
+                            out_buf_img,
+                        )
+
+        return X_out
 
     if use_fastpath:
 
